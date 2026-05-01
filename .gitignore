@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+venv/
+.venv/
+.pytest_cache/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Storage (keep structure, ignore contents)
+storage/books/*
+storage/voices/*
+storage/outputs/*
+storage/temp/*
+!storage/books/.gitkeep
+!storage/voices/.gitkeep
+!storage/outputs/.gitkeep
+!storage/temp/.gitkeep
+
+# Logs
+logs/*.log
+logs/.shutdown_state
+
+# Database
+*.db
+*.sqlite3
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.next/
+frontend/.env.local
+
+# Models (large files)
+*.pth
+*.pt
+*.bin
+*.onnx
+*.safetensors
+
+# Audio/media temp files
+*.wav.tmp
+*.mp3.tmp

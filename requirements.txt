@@ -1,0 +1,52 @@
+# Audio Book Creator - Dependencies
+# Install: pip install -r requirements.txt
+
+# Web Framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# Database
+sqlalchemy>=2.0.23
+aiosqlite>=0.19.0
+
+# Validation
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Ebook Parsing
+ebooklib>=0.18
+PyPDF2>=3.0.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# NLP / Text Analysis
+spacy>=3.7.0
+
+# TTS
+qwen-tts>=0.1.0
+torch>=2.1.0
+torchaudio>=2.1.0
+
+# Audio Processing
+librosa>=0.10.1
+soundfile>=0.12.1
+pydub>=0.25.1
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Configuration
+pyyaml>=6.0.1
+
+# Utilities
+python-dateutil>=2.8.2
+aiofiles>=23.2.1
+httpx>=0.25.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+
+# Logging
+colorlog>=6.7.0

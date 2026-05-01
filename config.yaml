@@ -1,0 +1,111 @@
+# Audio Book Creator Configuration
+# Precedence: defaults < config.yaml < environment variables < CLI arguments
+
+# Server settings
+server:
+  host: "0.0.0.0"
+  port: 8000
+  reload: true
+  timeout_keep_alive: 300
+
+# TTS Engine settings
+tts:
+  engine: "qwen3"  # Default TTS engine
+  qwen3:
+    model_name: "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+    default_temperature: 0.7
+    default_top_k: 50
+    default_top_p: 1.0
+    repetition_penalty: 1.05
+    max_new_tokens: 2048
+    chunk_max_seconds: 12  # Max chunk size for consistent voice
+    voice_sample_seconds: 20  # Duration for voice reference extraction
+
+# Audio processing
+audio:
+  sample_rate: 24000  # Qwen3 native sample rate
+  output_sample_rate: 44100  # Final output sample rate
+  crossfade_ms: 150  # Crossfade duration between segments
+  paragraph_silence_ms: 500  # Silence between paragraphs
+  chapter_silence_ms: 2000  # Silence between chapters
+  normalization_target_db: -16  # Target loudness (LUFS)
+  output_formats:
+    - mp3
+    - m4b
+    - wav
+
+# Ebook parsing
+ebook:
+  supported_formats:
+    - epub
+    - pdf
+    - txt
+  max_upload_size_mb: 500
+
+# NLP / Context analysis
+nlp:
+  spacy_model: "en_core_web_sm"
+  # Context analysis settings
+  emotion_detection: true
+  speaker_attribution: true
+  # Character voice inference
+  auto_voice_traits: true  # Infer voice traits from text descriptions
+
+# Voice profiles
+voices:
+  # Default narrator voice settings
+  narrator:
+    temperature: 0.7
+    speaking_rate: 1.0
+    pitch_shift: 0
+  # Consistency settings
+  deterministic:
+    use_seed: true
+    default_seed: 42
+    low_temperature: 0.5  # Lower temp for more consistent output
+
+# Generation settings
+generation:
+  # Hands-free mode defaults
+  auto_mode:
+    enabled: true
+    auto_detect_characters: true
+    auto_assign_voices: true
+    auto_analyze_context: true
+  # Job settings
+  max_concurrent_jobs: 2
+  checkpoint_interval: 10  # Save progress every N segments
+
+# Storage settings
+storage:
+  base_path: "storage"
+  cleanup_temp_days: 7
+  max_upload_size_mb: 500
+
+# Logging settings
+logging:
+  level: "INFO"
+  format: "detailed"
+  file_output: true
+  log_dir: "logs"
+
+# Platform-specific overrides
+platform:
+  macos:
+    mps_fallback: true
+  linux:
+    cuda_benchmark: true
+
+# Environment overrides
+environments:
+  development:
+    server:
+      reload: true
+    logging:
+      level: "DEBUG"
+  production:
+    server:
+      reload: false
+    logging:
+      level: "INFO"
+      file_output: true
