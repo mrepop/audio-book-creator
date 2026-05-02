@@ -225,8 +225,10 @@ def run_generation(job_id: str, is_resume: bool = False):
                     words_per_second=cc.words_per_second_estimate,
                 )
 
-                segment_audio_arrays = []      # One spliced audio per segment
+                segment_audio_paths = []       # Paths to segment WAV files on disk
                 paragraph_end_flags = []       # For chapter-level splicing
+                generation_calls_since_reset = 0  # Track calls for MPS reset
+                MPS_RESET_INTERVAL = 25        # Reload model every N segments to reset MPS allocator
 
                 for seg_idx, seg in enumerate(segments):
                     # ---- Stop check BETWEEN every segment ----
@@ -287,7 +289,7 @@ def run_generation(job_id: str, is_resume: bool = False):
                     )
                     del chunk_audios
 
-                    # Save segment audio to disk immediately (keep memory low)
+                    # Save segment audio to disk (do NOT hold in memory)
                     seg_path = str(
                         TEMP_DIR / f"job_{job_id}_ch{chapter.number:03d}_seg{seg.sequence_number:04d}.wav"
                     )
@@ -298,11 +300,22 @@ def run_generation(job_id: str, is_resume: bool = False):
                     seg.is_generated = True
                     completed_segments += 1
 
-                    segment_audio_arrays.append(seg_audio)
+                    segment_audio_paths.append(seg_path)
                     paragraph_end_flags.append(
-                        seg.segment_type.value == "narration"  # Treat narration ends as paragraph breaks
+                        seg.segment_type.value == "narration"
                     )
-                    del seg_audio
+                    del seg_audio, chunk_para_flags
+
+                    # ---- Periodic MPS allocator reset ----
+                    # macOS MPS never returns mapped pages to the OS.
+                    # Each generate_custom_voice call leaks ~35MB of RSS.
+                    # Cycling the model every N segments reclaims that memory.
+                    generation_calls_since_reset += len(chunks)
+                    if generation_calls_since_reset >= MPS_RESET_INTERVAL:
+                        _cycle_tts_engine()
+                        tts_engine = _get_tts_engine()
+                        generation_calls_since_reset = 0
+                        memory_snapshot("worker:post-mps-reset")
 
                     # Update progress
                     job.completed_segments = completed_segments
@@ -327,10 +340,16 @@ def run_generation(job_id: str, is_resume: bool = False):
                         f"rate={rate:.2f} seg/s | ETA={int(remaining)}s"
                     )
 
-                # ---- Assemble chapter from segment audio arrays ----
-                if segment_audio_arrays:
+                # ---- Assemble chapter from segment audio on disk ----
+                if segment_audio_paths:
+                    # Read segment audio from disk files (not held in memory)
+                    seg_audios = []
+                    for sp in segment_audio_paths:
+                        audio_data, _ = sf.read(sp)
+                        seg_audios.append(audio_data)
+
                     chapter_audio = splice_chunks(
-                        chunk_audios=segment_audio_arrays,
+                        chunk_audios=seg_audios,
                         sample_rate=sample_rate,
                         crossfade_ms=cc.crossfade_ms,
                         sentence_silence_ms=cc.sentence_silence_ms,
@@ -338,6 +357,7 @@ def run_generation(job_id: str, is_resume: bool = False):
                         target_lufs=-16.0,
                         paragraph_end_flags=paragraph_end_flags,
                     )
+                    del seg_audios
 
                     chapter_path = str(TEMP_DIR / f"job_{job_id}_ch{chapter.number:03d}.wav")
                     sf.write(chapter_path, chapter_audio, sample_rate)
@@ -354,9 +374,8 @@ def run_generation(job_id: str, is_resume: bool = False):
                         f"{chapter.audio_duration_seconds:.1f}s audio"
                     )
 
-                    # Release chapter audio from memory
                     del chapter_audio
-                    segment_audio_arrays.clear()
+                    segment_audio_paths.clear()
                     paragraph_end_flags.clear()
 
                     memory_snapshot(f"worker:chapter-{chapter.number}-done")
@@ -451,6 +470,31 @@ def _get_tts_engine():
             logger.error(f"Qwen3 TTS engine not available: {e}")
             logger.error("Ensure qwen-tts is installed: pip install -U qwen-tts")
             return None
+
+
+def _cycle_tts_engine():
+    """Unload and reload the TTS engine to reset the MPS memory allocator.
+
+    macOS MPS maps virtual pages for each generate call and never unmaps
+    them, causing RSS to grow ~35MB per call.  Destroying and recreating
+    the model is the only way to release those pages.  Takes ~4 seconds.
+    """
+    global _tts_engine
+    with _tts_engine_lock:
+        if _tts_engine is not None:
+            logger.info("Cycling TTS engine to reset MPS allocator...")
+            _tts_engine.cleanup()
+            _tts_engine = None
+            import gc
+            gc.collect()
+            gc.collect()
+            import torch
+            if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+                torch.mps.empty_cache()
+                if hasattr(torch.mps, "synchronize"):
+                    torch.mps.synchronize()
+            from src.utils.hardware import memory_snapshot
+            memory_snapshot("engine:post-unload")
 
 
 def _load_voice_profiles(db, book_id: int) -> dict:
