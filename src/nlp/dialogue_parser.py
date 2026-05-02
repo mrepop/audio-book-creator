@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 class DialogueParser:
     """Parses text into dialogue and narration segments."""
 
+    # All quote characters we recognize
+    OPEN_QUOTES = '"\u201c\u2018\u00ab'
+    CLOSE_QUOTES = '"\u201d\u2019\u00bb'
+    ALL_QUOTES = OPEN_QUOTES + CLOSE_QUOTES
+
     def parse_chapter(self, text: str) -> List[Dict]:
         """
         Parse chapter text into ordered segments.
@@ -23,14 +28,14 @@ class DialogueParser:
             text, type ('dialogue' or 'narration'), speaker (name or None)
         """
         segments = []
-        # Split into paragraphs first
-        paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
+        # Split on double newlines (actual paragraph boundaries)
+        paragraphs = [p.strip() for p in re.split(r'\n\n+', text) if p.strip()]
 
         for para in paragraphs:
             para_segments = self._parse_paragraph(para)
             segments.extend(para_segments)
 
-        # Merge adjacent narration segments that are very short
+        # Merge adjacent short narration segments
         merged = self._merge_short_segments(segments)
 
         return merged
@@ -38,8 +43,8 @@ class DialogueParser:
     def _parse_paragraph(self, paragraph: str) -> List[Dict]:
         """Parse a single paragraph into segments."""
         segments = []
-        # Find all quoted dialogue
-        pattern = re.compile(r'"([^"]+)"')
+        # Find all quoted dialogue (straight and curly quotes)
+        pattern = re.compile(r'["\u201c]([^"\u201d\u201c]+)["\u201d]')
 
         last_end = 0
         for match in pattern.finditer(paragraph):

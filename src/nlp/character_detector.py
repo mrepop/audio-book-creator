@@ -32,6 +32,13 @@ class CharacterDetector:
                 raise
         return self._nlp
 
+    # Words that should never be character names
+    STOP_NAMES = {
+        "project", "gutenberg", "chapter", "volume", "letter", "part",
+        "contents", "preface", "introduction", "epilogue", "prologue",
+        "copyright", "license", "edition", "published", "author",
+    }
+
     def detect_characters(self, text: str) -> List[Dict]:
         """
         Detect characters in the full book text.
@@ -52,8 +59,8 @@ class CharacterDetector:
             doc = nlp(chunk)
             for ent in doc.ents:
                 if ent.label_ == "PERSON":
-                    name = ent.text.strip()
-                    if len(name) > 1 and not name.isnumeric():
+                    name = self._clean_name(ent.text)
+                    if name and len(name) > 1 and not name.isnumeric():
                         person_counts[name] += 1
 
         # Merge similar names (e.g., "John" and "John Smith")
@@ -62,11 +69,11 @@ class CharacterDetector:
         # Count dialogue per character
         dialogue_counts = self._count_dialogue(text, merged)
 
-        # Build character profiles
+        # Build character profiles, limit to top 30 real characters
         characters = []
-        for name, count in merged.most_common(50):  # Top 50 characters
-            if count < 2:
-                continue  # Skip one-off mentions
+        for name, count in merged.most_common(30):
+            if count < 3:
+                continue  # Skip low-mention names
 
             char = {
                 "name": name,
@@ -84,6 +91,27 @@ class CharacterDetector:
 
         logger.info(f"Detected {len(characters)} characters")
         return characters
+
+    def _clean_name(self, raw: str) -> Optional[str]:
+        """Clean NER-extracted name by stripping junk characters."""
+        # Strip leading/trailing punctuation, quotes, whitespace
+        name = re.sub(r'^[^a-zA-Z]+', '', raw)
+        name = re.sub(r'[^a-zA-Z.\s]+$', '', name)
+        name = name.strip()
+
+        if not name or len(name) < 2:
+            return None
+
+        # Filter out stop words and non-character names
+        if name.lower().split()[0] in self.STOP_NAMES:
+            return None
+
+        # Filter names that are too short after cleaning
+        # (single letters, common words)
+        if len(name) <= 2 and name.lower() in {'i', 'a', 'an', 'it', 'he', 'she', 'we', 'me'}:
+            return None
+
+        return name
 
     def _merge_similar_names(self, counts: Counter) -> Counter:
         """Merge counts for similar names (e.g., 'John Smith' and 'John')."""
@@ -109,14 +137,34 @@ class CharacterDetector:
         dialogue_counts = {}
         names = list(name_counts.keys())
 
-        # Find attribution patterns near dialogue
-        pattern = re.compile(r'"[^"]+"[^"]*?(\w+)\s+(?:said|replied|asked|whispered|shouted)', re.IGNORECASE)
-        for match in pattern.finditer(text):
-            speaker = match.group(1)
-            for name in names:
-                if speaker.lower() in name.lower() or name.lower().startswith(speaker.lower()):
-                    dialogue_counts[name] = dialogue_counts.get(name, 0) + 1
-                    break
+        speech_verbs = r'(?:said|replied|asked|whispered|shouted|exclaimed|cried|muttered|murmured|answered|declared|remarked|observed|continued|added)'
+
+        # Handle multiple quote styles: straight, curly, and guillemets
+        quote_patterns = [
+            re.compile(r'["\u201c\u201d][^"\u201c\u201d]+["\u201c\u201d][^"\u201c\u201d]*?(\w+)\s+' + speech_verbs, re.IGNORECASE),
+            re.compile(r'(\w+)\s+' + speech_verbs + r'[,:]?\s*["\u201c]', re.IGNORECASE),
+        ]
+
+        # Also match patterns like: NAME said, "..."
+        # and "..." said NAME
+        for pattern in quote_patterns:
+            for match in pattern.finditer(text):
+                speaker = match.group(1)
+                for name in names:
+                    name_parts = name.lower().split()
+                    if speaker.lower() in name_parts or name.lower().startswith(speaker.lower()):
+                        dialogue_counts[name] = dialogue_counts.get(name, 0) + 1
+                        break
+
+        # Also count by proximity: name appears within 200 chars of a speech verb
+        for name in names:
+            nearby_pattern = re.compile(
+                rf'\b{re.escape(name)}\b.{{0,100}}\b{speech_verbs}\b|\b{speech_verbs}\b.{{0,100}}\b{re.escape(name)}\b',
+                re.IGNORECASE
+            )
+            proximity_count = len(nearby_pattern.findall(text))
+            if proximity_count > 0:
+                dialogue_counts[name] = dialogue_counts.get(name, 0) + proximity_count
 
         return dialogue_counts
 
@@ -132,18 +180,21 @@ class CharacterDetector:
 
     def _infer_gender(self, name: str, text: str) -> Optional[str]:
         """Infer gender from pronoun usage near the character name."""
-        # Find pronouns used near the character name
+        escaped = re.escape(name)
+        # Wider window: pronouns within 200 chars of the name
         male_patterns = [
-            rf'{name}\s+(?:he|him|his)\b',
-            rf'\b(?:he|him|his)\s+{name}\b',
+            rf'{escaped}.{{0,200}}\b(?:he|him|his)\b',
+            rf'\b(?:he|him|his)\b.{{0,200}}{escaped}',
         ]
         female_patterns = [
-            rf'{name}\s+(?:she|her|hers)\b',
-            rf'\b(?:she|her|hers)\s+{name}\b',
+            rf'{escaped}.{{0,200}}\b(?:she|her|hers)\b',
+            rf'\b(?:she|her|hers)\b.{{0,200}}{escaped}',
         ]
 
-        male_count = sum(len(re.findall(p, text[:50000], re.IGNORECASE)) for p in male_patterns)
-        female_count = sum(len(re.findall(p, text[:50000], re.IGNORECASE)) for p in female_patterns)
+        # Search more of the text (first 200k chars)
+        search_text = text[:200000]
+        male_count = sum(len(re.findall(p, search_text, re.IGNORECASE | re.DOTALL)) for p in male_patterns)
+        female_count = sum(len(re.findall(p, search_text, re.IGNORECASE | re.DOTALL)) for p in female_patterns)
 
         if male_count > female_count and male_count >= 2:
             return "male"
