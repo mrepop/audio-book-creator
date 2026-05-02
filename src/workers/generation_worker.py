@@ -61,8 +61,9 @@ def run_generation(job_id: str, is_resume: bool = False):
     from src.api.database import get_db_context
     from src.api.config import get_config
     from src.models import GenerationJob, Book, Chapter, Segment, VoiceProfile, Character, JobStatus
-    from src.audio.concatenator import concatenate_segments, concatenate_chapters
-    from src.audio.normalizer import loudness_normalize, normalize_audio
+    from src.audio.concatenator import concatenate_chapters
+    from src.audio.splicer import splice_chunks
+    from src.tts.chunker import chunk_text, ChunkerConfig
     from src.utils.hardware import profile_resources, log_profile, get_memory_pressure, memory_snapshot
 
     # ---- Cancel any previous worker for this job ----
@@ -215,14 +216,20 @@ def run_generation(job_id: str, is_resume: bool = False):
                 else:
                     segments = all_segments
 
-                # ---- Memory-aware batched generation with disk flushing ----
-                segment_audio_arrays = []      # Accumulator; flushed periodically
-                flush_part_paths = []           # Temp WAV paths for flushed parts
-                unflushed_count = 0             # Segments since last flush
-                current_batch_size = base_batch_size
+                # ---- Sentence-level chunked generation ----
+                # Build chunking config from app config
+                cc = config.chunking
+                chunker_cfg = ChunkerConfig(
+                    target_seconds=cc.target_chunk_seconds,
+                    max_seconds=cc.max_chunk_seconds,
+                    words_per_second=cc.words_per_second_estimate,
+                )
 
-                for batch_start in range(0, len(segments), current_batch_size):
-                    # ---- Stop check BETWEEN every segment/batch ----
+                segment_audio_arrays = []      # One spliced audio per segment
+                paragraph_end_flags = []       # For chapter-level splicing
+
+                for seg_idx, seg in enumerate(segments):
+                    # ---- Stop check BETWEEN every segment ----
                     if cancel_event.is_set() or _is_stopped(db, job):
                         logger.info(
                             f"Job {job_id} stopped mid-chapter "
@@ -230,74 +237,74 @@ def run_generation(job_id: str, is_resume: bool = False):
                         )
                         return
 
-                    # Adaptive batch size: check memory pressure before each batch
-                    pressure = get_memory_pressure()
-                    if pressure > pressure_threshold:
-                        new_size = max(rc.min_batch_size, current_batch_size // 2)
-                        if new_size != current_batch_size:
-                            logger.warning(
-                                f"Memory pressure {pressure:.0%} > {pressure_threshold:.0%} -- "
-                                f"reducing batch {current_batch_size} -> {new_size}"
-                            )
-                            current_batch_size = new_size
-                    elif pressure < pressure_threshold * 0.6 and current_batch_size < base_batch_size:
-                        # Recover batch size when pressure drops
-                        new_size = min(base_batch_size, current_batch_size * 2)
-                        logger.info(f"Memory pressure eased ({pressure:.0%}) -- restoring batch to {new_size}")
-                        current_batch_size = new_size
+                    seg_text = seg.user_text_override or seg.text
+                    speaker = (
+                        speaker_map.get(seg.character_id, narrator_speaker)
+                        if seg.character_id else narrator_speaker
+                    )
+                    instruct = tts_engine._build_instruction({
+                        "emotion": seg.emotion, "emphasis": seg.emphasis, "pacing": seg.pacing
+                    })
 
-                    batch_segs = segments[batch_start:batch_start + current_batch_size]
-                    batch_texts = [s.user_text_override or s.text for s in batch_segs]
-                    batch_speakers = [
-                        speaker_map.get(s.character_id, narrator_speaker) if s.character_id else narrator_speaker
-                        for s in batch_segs
-                    ]
-                    batch_instructions = [
-                        tts_engine._build_instruction({
-                            "emotion": s.emotion, "emphasis": s.emphasis, "pacing": s.pacing
-                        }) if tts_engine else ""
-                        for s in batch_segs
-                    ]
+                    # Chunk this segment's text into 12-15s pieces
+                    chunks = chunk_text(seg_text, config=chunker_cfg)
 
-                    # Batch generate
+                    if not chunks:
+                        logger.warning(f"Segment {seg.sequence_number}: no chunks produced, skipping")
+                        continue
+
+                    logger.info(
+                        f"Segment {seg_idx+1}/{len(segments)}: "
+                        f"{len(chunks)} chunk(s), speaker={speaker}"
+                    )
+
+                    # Generate each chunk individually
                     try:
-                        batch_results = tts_engine.generate_batch(
-                            texts=batch_texts,
-                            speakers=batch_speakers,
-                            instructions=batch_instructions,
+                        chunk_results = tts_engine.generate_chunks(
+                            chunks=chunks,
+                            speaker=speaker,
+                            instruct=instruct,
+                            temperature=0.7,
+                            seed=42,
                         )
                     except Exception as e:
-                        _fail_job(db, job, f"TTS batch generation failed on chapter {chapter.number}: {e}")
+                        _fail_job(db, job, f"TTS chunk generation failed on chapter {chapter.number}, segment {seg.sequence_number}: {e}")
                         return
 
-                    # Process results -- copy audio and release batch_results
-                    for i, (audio_array, sr) in enumerate(batch_results):
-                        seg = batch_segs[i]
-                        segment_audio_arrays.append(audio_array)
-                        seg.is_generated = True
-                        seg.audio_duration_seconds = len(audio_array) / sample_rate
-                        completed_segments += 1
-                        unflushed_count += 1
-                    del batch_results  # Release references
+                    # Splice chunks into one segment audio
+                    chunk_audios = [audio for audio, sr in chunk_results]
+                    chunk_para_flags = [c.is_paragraph_end for c in chunks]
+                    del chunk_results
 
-                    # ---- Flush to disk if we've accumulated enough segments ----
-                    if unflushed_count >= flush_interval:
-                        flush_path = str(
-                            TEMP_DIR / f"job_{job_id}_ch{chapter.number:03d}_part{len(flush_part_paths):03d}.wav"
-                        )
-                        part_audio = concatenate_segments(segment_audio_arrays, sample_rate)
-                        sf.write(flush_path, part_audio, sample_rate)
-                        flush_part_paths.append(flush_path)
-                        logger.debug(
-                            f"Flushed {len(segment_audio_arrays)} segments to {Path(flush_path).name} "
-                            f"({len(part_audio)/sample_rate:.1f}s)"
-                        )
-                        del part_audio
-                        segment_audio_arrays.clear()
-                        unflushed_count = 0
-                        memory_snapshot(f"worker:post-flush ch{chapter.number}")
+                    seg_audio = splice_chunks(
+                        chunk_audios=chunk_audios,
+                        sample_rate=sample_rate,
+                        crossfade_ms=cc.crossfade_ms,
+                        sentence_silence_ms=cc.sentence_silence_ms,
+                        paragraph_silence_ms=cc.paragraph_silence_ms,
+                        target_lufs=-16.0,
+                        paragraph_end_flags=chunk_para_flags,
+                    )
+                    del chunk_audios
 
-                    # Update progress after each batch
+                    # Save segment audio to disk immediately (keep memory low)
+                    seg_path = str(
+                        TEMP_DIR / f"job_{job_id}_ch{chapter.number:03d}_seg{seg.sequence_number:04d}.wav"
+                    )
+                    sf.write(seg_path, seg_audio, sample_rate)
+
+                    seg.audio_path = seg_path
+                    seg.audio_duration_seconds = len(seg_audio) / sample_rate
+                    seg.is_generated = True
+                    completed_segments += 1
+
+                    segment_audio_arrays.append(seg_audio)
+                    paragraph_end_flags.append(
+                        seg.segment_type.value == "narration"  # Treat narration ends as paragraph breaks
+                    )
+                    del seg_audio
+
+                    # Update progress
                     job.completed_segments = completed_segments
                     job.progress = (completed_segments / total_segments) * 100
                     elapsed = (datetime.now(timezone.utc) - (job.resumed_at or job.started_at)).total_seconds()
@@ -306,53 +313,31 @@ def run_generation(job_id: str, is_resume: bool = False):
                     job.current_step = (
                         f"Chapter {chapter.number}/{len(chapters)} | "
                         f"{completed_segments}/{total_segments} segments | "
-                        f"batch={current_batch_size} | "
                         f"ETA: {int(remaining // 60)}m {int(remaining % 60)}s"
                     )
                     db.commit()
 
-                    # Full memory snapshot after every batch
-                    snap = memory_snapshot(
-                        f"worker:batch-done seg={completed_segments}/{total_segments} "
+                    memory_snapshot(
+                        f"worker:seg-done seg={completed_segments}/{total_segments} "
                         f"ch={chapter.number}/{len(chapters)}"
                     )
                     logger.info(
-                        f"Batch complete: {completed_segments}/{total_segments} "
-                        f"({job.progress:.1f}%) | batch={current_batch_size} | "
-                        f"rate={rate:.2f} seg/s | ETA={int(remaining)}s | "
-                        f"arrays_held={len(segment_audio_arrays)}"
+                        f"Segment {completed_segments}/{total_segments} "
+                        f"({job.progress:.1f}%) | "
+                        f"rate={rate:.2f} seg/s | ETA={int(remaining)}s"
                     )
 
-                # ---- Assemble chapter from flushed parts + remaining segments ----
-                # For resumed partial chapters, we need ALL segments (including
-                # previously generated ones) to rebuild the chapter audio correctly.
-                if is_resume and not chapter.is_generated:
-                    # Re-generate chapter from all segments (generated ones produce
-                    # placeholder-length silence which is fine for ordering, but we
-                    # actually need to regenerate only the missing ones -- the newly
-                    # generated ones are in segment_audio_arrays/flush_part_paths,
-                    # so we just proceed with what we have for new segments).
-                    pass  # fall through to the assembly block below
-
-                if segment_audio_arrays or flush_part_paths:
-                    # Flush any remaining segments
-                    if segment_audio_arrays:
-                        flush_path = str(
-                            TEMP_DIR / f"job_{job_id}_ch{chapter.number:03d}_part{len(flush_part_paths):03d}.wav"
-                        )
-                        part_audio = concatenate_segments(segment_audio_arrays, sample_rate)
-                        sf.write(flush_path, part_audio, sample_rate)
-                        flush_part_paths.append(flush_path)
-                        segment_audio_arrays.clear()
-
-                    if len(flush_part_paths) == 1:
-                        # Only one part -- just read, normalize, and re-save as chapter
-                        chapter_audio, _ = sf.read(flush_part_paths[0])
-                    else:
-                        # Multiple parts -- concatenate the part files
-                        chapter_audio = _concatenate_part_files(flush_part_paths, sample_rate)
-
-                    chapter_audio = loudness_normalize(chapter_audio, sample_rate, target_lufs=-16.0)
+                # ---- Assemble chapter from segment audio arrays ----
+                if segment_audio_arrays:
+                    chapter_audio = splice_chunks(
+                        chunk_audios=segment_audio_arrays,
+                        sample_rate=sample_rate,
+                        crossfade_ms=cc.crossfade_ms,
+                        sentence_silence_ms=cc.sentence_silence_ms,
+                        paragraph_silence_ms=cc.paragraph_silence_ms,
+                        target_lufs=-16.0,
+                        paragraph_end_flags=paragraph_end_flags,
+                    )
 
                     chapter_path = str(TEMP_DIR / f"job_{job_id}_ch{chapter.number:03d}.wav")
                     sf.write(chapter_path, chapter_audio, sample_rate)
@@ -369,16 +354,10 @@ def run_generation(job_id: str, is_resume: bool = False):
                         f"{chapter.audio_duration_seconds:.1f}s audio"
                     )
 
-                    # Clean up part files to free disk space
-                    for fp in flush_part_paths:
-                        try:
-                            Path(fp).unlink(missing_ok=True)
-                        except OSError:
-                            pass
-                    flush_part_paths.clear()
-
                     # Release chapter audio from memory
                     del chapter_audio
+                    segment_audio_arrays.clear()
+                    paragraph_end_flags.clear()
 
                     memory_snapshot(f"worker:chapter-{chapter.number}-done")
 

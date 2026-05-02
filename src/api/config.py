@@ -67,6 +67,16 @@ class LoggingConfig:
 
 
 @dataclass
+class ChunkingConfig:
+    target_chunk_seconds: float = 12.0
+    max_chunk_seconds: float = 15.0
+    sentence_silence_ms: int = 200
+    paragraph_silence_ms: int = 500
+    crossfade_ms: int = 100
+    words_per_second_estimate: float = 2.5
+
+
+@dataclass
 class ResourceConfig:
     batch_size: str = "auto"  # "auto" or integer string
     memory_headroom_percent: float = 20.0
@@ -92,6 +102,7 @@ class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
+    chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
     resources: ResourceConfig = field(default_factory=ResourceConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     config_path: Optional[str] = None
@@ -168,6 +179,17 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             chapter_silence_ms=aud.get("chapter_silence_ms", config.audio.chapter_silence_ms),
             normalization_target_db=aud.get("normalization_target_db", config.audio.normalization_target_db),
             output_formats=aud.get("output_formats", config.audio.output_formats),
+        )
+
+        # Chunking
+        chunk_raw = raw.get("chunking", {})
+        config.chunking = ChunkingConfig(
+            target_chunk_seconds=float(chunk_raw.get("target_chunk_seconds", config.chunking.target_chunk_seconds)),
+            max_chunk_seconds=float(chunk_raw.get("max_chunk_seconds", config.chunking.max_chunk_seconds)),
+            sentence_silence_ms=int(chunk_raw.get("sentence_silence_ms", config.chunking.sentence_silence_ms)),
+            paragraph_silence_ms=int(chunk_raw.get("paragraph_silence_ms", config.chunking.paragraph_silence_ms)),
+            crossfade_ms=int(chunk_raw.get("crossfade_ms", config.chunking.crossfade_ms)),
+            words_per_second_estimate=float(chunk_raw.get("words_per_second_estimate", config.chunking.words_per_second_estimate)),
         )
 
         # Resources

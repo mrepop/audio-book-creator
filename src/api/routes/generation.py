@@ -223,6 +223,100 @@ async def regenerate_segment(
     return {"status": "regenerating", "segment_id": segment_id}
 
 
+@router.post("/segments/{segment_id}/preview")
+async def preview_segment_audio(
+    segment_id: int,
+    db: Session = Depends(get_db),
+):
+    """Generate and return audio preview for a single segment.
+
+    Uses the chunker to split into 12-15s pieces, generates each chunk,
+    splices them together, and returns the WAV audio directly.
+    """
+    from fastapi.responses import Response
+    from src.workers.generation_worker import _get_tts_engine
+    from src.tts.chunker import chunk_text, ChunkerConfig
+    from src.audio.splicer import splice_chunks
+    from src.api.config import get_config
+    import soundfile as sf
+    import io
+
+    segment = db.query(Segment).filter(Segment.id == segment_id).first()
+    if not segment:
+        raise HTTPException(404, "Segment not found")
+
+    engine = _get_tts_engine()
+    if engine is None:
+        raise HTTPException(503, "TTS engine not available")
+
+    config = get_config()
+    cc = config.chunking
+    chunker_cfg = ChunkerConfig(
+        target_seconds=cc.target_chunk_seconds,
+        max_seconds=cc.max_chunk_seconds,
+        words_per_second=cc.words_per_second_estimate,
+    )
+
+    text = segment.user_text_override or segment.text
+    chunks = chunk_text(text, config=chunker_cfg)
+
+    if not chunks:
+        raise HTTPException(400, "Segment text produced no chunks")
+
+    # Build instruct from segment context
+    instruct = engine._build_instruction({
+        "emotion": segment.emotion,
+        "emphasis": segment.emphasis,
+        "pacing": segment.pacing,
+    })
+
+    # Use narrator speaker as default; caller can override via segment params
+    speaker = "Ryan"
+
+    import asyncio
+    from functools import partial
+
+    loop = asyncio.get_event_loop()
+    chunk_results = await loop.run_in_executor(
+        None,
+        partial(
+            engine.generate_chunks,
+            chunks=chunks,
+            speaker=speaker,
+            instruct=instruct,
+            temperature=0.7,
+            seed=42,
+        ),
+    )
+
+    chunk_audios = [audio for audio, sr in chunk_results]
+    chunk_para_flags = [c.is_paragraph_end for c in chunks]
+    sample_rate = chunk_results[0][1] if chunk_results else 24000
+
+    audio = splice_chunks(
+        chunk_audios=chunk_audios,
+        sample_rate=sample_rate,
+        crossfade_ms=cc.crossfade_ms,
+        sentence_silence_ms=cc.sentence_silence_ms,
+        paragraph_silence_ms=cc.paragraph_silence_ms,
+        target_lufs=-16.0,
+        paragraph_end_flags=chunk_para_flags,
+    )
+
+    # Encode to WAV in memory
+    buf = io.BytesIO()
+    sf.write(buf, audio, sample_rate, format="WAV")
+    buf.seek(0)
+
+    logger.info(f"Preview generated for segment {segment_id}: {len(audio)/sample_rate:.2f}s")
+
+    return Response(
+        content=buf.read(),
+        media_type="audio/wav",
+        headers={"Content-Disposition": f"inline; filename=preview_seg_{segment_id}.wav"},
+    )
+
+
 async def _run_generation(job_id: str, is_resume: bool = False):
     """Background task: run full audiobook generation pipeline in a thread."""
     import asyncio

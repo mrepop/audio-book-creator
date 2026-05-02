@@ -64,12 +64,21 @@ voices:
     default_seed: 42
     low_temperature: 0.5  # Lower temp for more consistent output
 
+# Chunking -- controls sentence-level audio generation
+chunking:
+  target_chunk_seconds: 12     # Target duration per TTS chunk (seconds)
+  max_chunk_seconds: 15        # Hard cap -- never generate longer than this
+  sentence_silence_ms: 200     # Silence inserted between sentences
+  paragraph_silence_ms: 500    # Silence inserted between paragraphs
+  crossfade_ms: 100            # Hann-window crossfade at chunk boundaries
+  words_per_second_estimate: 2.5  # Used to estimate sentence duration before TTS
+
 # Resource management -- controls memory-aware batch sizing
 resources:
-  batch_size: auto         # "auto" to detect from hardware, or integer override
+  batch_size: 1            # TESTING: forced to 1 for memory debugging (was: auto)
   memory_headroom_percent: 20   # % of total RAM to keep free
   per_segment_cost_gb: 1.5      # Estimated memory per segment in a batch
-  max_batch_size: 8              # Upper bound for auto batch sizing
+  max_batch_size: 1              # TESTING: forced to 1 for memory debugging (was: 8)
   min_batch_size: 1              # Lower bound
   flush_interval: 50             # Flush segment audio to disk every N segments
   memory_pressure_threshold: 0.85  # Halve batch if memory usage exceeds this (0-1)
@@ -83,7 +92,7 @@ generation:
     auto_assign_voices: true
     auto_analyze_context: true
   # Job settings
-  max_concurrent_jobs: 2
+  max_concurrent_jobs: 1  # TESTING: forced to 1 for memory debugging (was: 2)
   checkpoint_interval: 10  # Save progress every N segments
 
 # Storage settings

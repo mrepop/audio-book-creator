@@ -141,6 +141,15 @@ export const generation = {
   pause: (jobId: string) => request(`/api/generation/jobs/${jobId}/pause`, { method: 'POST' }),
   resume: (jobId: string) => request<GenerationJob>(`/api/generation/jobs/${jobId}/resume`, { method: 'POST' }),
   segments: (chapterId: number) => request<Segment[]>(`/api/generation/chapters/${chapterId}/segments`),
+  updateSegment: (segmentId: number, data: Partial<Segment>) =>
+    request<Segment>(`/api/generation/segments/${segmentId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  regenerateSegment: (segmentId: number) =>
+    request(`/api/generation/segments/${segmentId}/regenerate`, { method: 'POST' }),
+  previewSegment: async (segmentId: number): Promise<Blob> => {
+    const res = await fetch(`/api/generation/segments/${segmentId}/preview`, { method: 'POST' });
+    if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+    return res.blob();
+  },
 };
 
 // ---- Health ----

@@ -383,6 +383,92 @@ class Qwen3TTSEngine:
             self._flush_gpu_cache()
             raise
 
+    def generate_chunks(
+        self,
+        chunks,
+        speaker: str = "Ryan",
+        instruct: str = "",
+        language: str = "English",
+        temperature: float = 0.7,
+        top_k: int = 50,
+        top_p: float = 0.95,
+        seed: Optional[int] = 42,
+    ) -> list[tuple[np.ndarray, int]]:
+        """Generate audio for a list of text chunks, one at a time.
+
+        Each chunk is generated individually to keep output under the
+        Qwen3 quality threshold (~12-15s).  The same speaker, seed, and
+        temperature are used across all chunks for voice consistency.
+
+        Args:
+            chunks: List of Chunk objects (from chunker.py) or plain strings.
+            speaker: Preset speaker name.
+            instruct: Emotion/style instruction (shared across chunks).
+            language: Language for all chunks.
+            temperature: Sampling temperature (0.7 recommended for consistency).
+            seed: Random seed for deterministic generation across chunks.
+
+        Returns:
+            List of (audio_array, sample_rate) tuples, one per chunk.
+        """
+        model = self._load_model()
+        results = []
+
+        for i, chunk in enumerate(chunks):
+            text = chunk.text if hasattr(chunk, "text") else str(chunk)
+            est = f"~{chunk.estimated_duration:.1f}s" if hasattr(chunk, "estimated_duration") else "?"
+
+            logger.info(f"Chunk {i+1}/{len(chunks)}: {est} | '{text[:60]}...'")
+
+            # Set seed before each chunk for reproducibility
+            if seed is not None:
+                torch.manual_seed(seed + i)  # Offset by index for variety within consistency
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed(seed + i)
+
+            try:
+                memory_snapshot(f"chunk:{i+1}/{len(chunks)}:pre")
+
+                with torch.inference_mode():
+                    wavs, sr = model.generate_custom_voice(
+                        text=text,
+                        language=language,
+                        speaker=speaker,
+                        instruct=instruct if instruct else None,
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                        max_new_tokens=2048,
+                    )
+
+                if not wavs or len(wavs[0]) == 0:
+                    logger.warning(f"Chunk {i+1}: empty waveform, inserting silence")
+                    word_count = len(text.split())
+                    silence_dur = max(0.5, word_count * 0.15)
+                    results.append((np.zeros(int(24000 * silence_dur), dtype=np.float32), 24000))
+                else:
+                    audio = wavs[0]
+                    if isinstance(audio, torch.Tensor):
+                        audio = audio.detach().cpu().float().numpy().copy()
+                    else:
+                        audio = np.array(audio, dtype=np.float32, copy=True)
+                    results.append((audio, sr))
+                    logger.info(f"Chunk {i+1}: generated {len(audio)/sr:.2f}s")
+
+                del wavs
+                self._flush_gpu_cache()
+                memory_snapshot(f"chunk:{i+1}/{len(chunks)}:post")
+
+            except Exception as e:
+                logger.error(f"Chunk {i+1} generation failed: {e}", exc_info=True)
+                self._flush_gpu_cache()
+                # Insert silence placeholder so indexing stays aligned
+                word_count = len(text.split())
+                silence_dur = max(0.5, word_count * 0.15)
+                results.append((np.zeros(int(24000 * silence_dur), dtype=np.float32), 24000))
+
+        return results
+
     def _flush_gpu_cache(self):
         """Force-release cached GPU/MPS memory back to the OS."""
         # Full GC pass first to break reference cycles
