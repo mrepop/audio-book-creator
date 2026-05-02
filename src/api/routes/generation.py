@@ -92,6 +92,61 @@ async def cancel_generation_job(job_id: str, db: Session = Depends(get_db)):
     return {"status": "cancelled", "job_id": job_id}
 
 
+@router.post("/jobs/{job_id}/pause")
+async def pause_generation_job(job_id: str, db: Session = Depends(get_db)):
+    """Pause a running generation job. The worker will stop at the next batch boundary."""
+    job = db.query(GenerationJob).filter(GenerationJob.job_id == job_id).first()
+    if not job:
+        raise HTTPException(404, "Job not found")
+    active_states = (JobStatus.PENDING, JobStatus.PARSING, JobStatus.ANALYZING,
+                     JobStatus.GENERATING, JobStatus.PROCESSING)
+    if job.status not in active_states:
+        raise HTTPException(400, f"Cannot pause job in state: {job.status.value}")
+
+    job.status = JobStatus.PAUSED
+    db.commit()
+    logger.info(f"Job {job_id} paused by user")
+    return {"status": "paused", "job_id": job_id}
+
+
+@router.post("/jobs/{job_id}/resume", response_model=GenerationJobResponse)
+async def resume_generation_job(
+    job_id: str,
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    db: Session = Depends(get_db),
+):
+    """Resume a paused, failed, or cancelled generation job from where it left off."""
+    from datetime import datetime, timezone
+
+    job = db.query(GenerationJob).filter(GenerationJob.job_id == job_id).first()
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    resumable = (JobStatus.PAUSED, JobStatus.FAILED, JobStatus.CANCELLED)
+    if job.status not in resumable:
+        raise HTTPException(
+            400,
+            f"Cannot resume job in state: {job.status.value}. "
+            f"Only paused, failed, or cancelled jobs can be resumed."
+        )
+
+    # Prepare for resume
+    job.status = JobStatus.GENERATING
+    job.resumed_at = datetime.now(timezone.utc)
+    job.resume_count = (job.resume_count or 0) + 1
+    job.error_message = None
+    job.completed_at = None
+    job.current_step = "Resuming..."
+    db.commit()
+    db.refresh(job)
+
+    # Launch worker with resume flag
+    background_tasks.add_task(_run_generation, job.job_id, is_resume=True)
+
+    logger.info(f"Job {job_id} resumed (attempt #{job.resume_count})")
+    return job
+
+
 @router.get("/jobs/{job_id}/download")
 async def download_audiobook(job_id: str, db: Session = Depends(get_db)):
     """Download the generated audiobook file."""
@@ -161,34 +216,22 @@ async def regenerate_segment(
     return {"status": "regenerating", "segment_id": segment_id}
 
 
-async def _run_generation(job_id: str):
-    """Background task: run full audiobook generation pipeline."""
-    from src.api.database import get_db_context
-
-    try:
-        with get_db_context() as db:
-            job = db.query(GenerationJob).filter(GenerationJob.job_id == job_id).first()
-            if not job:
-                return
-
-            job.status = JobStatus.GENERATING
-            db.commit()
-
-            # TODO: Implement full generation pipeline
-            # 1. For each chapter, get segments
-            # 2. For each segment, generate audio with appropriate voice
-            # 3. Concatenate segments into chapter audio
-            # 4. Concatenate chapters into full audiobook
-            # 5. Export in requested format
-
-            logger.info(f"Generation job {job_id} started (pipeline not yet implemented)")
-    except Exception as e:
-        logger.error(f"Generation job {job_id} failed: {e}")
+async def _run_generation(job_id: str, is_resume: bool = False):
+    """Background task: run full audiobook generation pipeline in a thread."""
+    import asyncio
+    from functools import partial
+    from src.workers.generation_worker import run_generation
+    label = "Resuming" if is_resume else "Starting"
+    logger.info(f"{label} generation pipeline for job {job_id} (in thread pool)")
+    # Run in thread pool so the event loop stays free for API requests
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, partial(run_generation, job_id, is_resume=is_resume))
 
 
 async def _regenerate_segment(segment_id: int):
     """Background task: regenerate a single segment's audio."""
     from src.api.database import get_db_context
+    from src.tts.qwen3_engine import Qwen3TTSEngine
 
     try:
         with get_db_context() as db:
@@ -196,7 +239,32 @@ async def _regenerate_segment(segment_id: int):
             if not segment:
                 return
 
-            # TODO: Implement single segment regeneration
-            logger.info(f"Segment {segment_id} regeneration started (not yet implemented)")
+            engine = Qwen3TTSEngine()
+            text = segment.user_text_override or segment.text
+            context = {
+                "emotion": segment.emotion,
+                "emphasis": segment.emphasis,
+                "pacing": segment.pacing,
+            }
+
+            audio, sr = engine.generate_segment(
+                text=text,
+                speaker="Ryan",
+                language="English",
+                context=context,
+            )
+
+            import soundfile as sf
+            from pathlib import Path
+            output_path = Path("storage/temp") / f"segment_{segment_id}.wav"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            sf.write(str(output_path), audio, sr)
+
+            segment.audio_path = str(output_path)
+            segment.audio_duration_seconds = len(audio) / sr
+            segment.is_generated = True
+            db.commit()
+
+            logger.info(f"Segment {segment_id} regenerated: {len(audio)/sr:.2f}s")
     except Exception as e:
-        logger.error(f"Segment {segment_id} regeneration failed: {e}")
+        logger.error(f"Segment {segment_id} regeneration failed: {e}", exc_info=True)
