@@ -14,9 +14,14 @@ from typing import Optional
 from dataclasses import dataclass, field
 
 import yaml
-import torch
 
 logger = logging.getLogger(__name__)
+
+try:
+    import torch
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
@@ -62,10 +67,32 @@ class LoggingConfig:
 
 
 @dataclass
+class ResourceConfig:
+    batch_size: str = "auto"  # "auto" or integer string
+    memory_headroom_percent: float = 20.0
+    per_segment_cost_gb: float = 1.5
+    max_batch_size: int = 12
+    min_batch_size: int = 1
+    flush_interval: int = 50
+    memory_pressure_threshold: float = 0.85
+
+    @property
+    def batch_size_override(self) -> Optional[int]:
+        """Return int if manually set, None if 'auto'."""
+        if self.batch_size == "auto":
+            return None
+        try:
+            return int(self.batch_size)
+        except (ValueError, TypeError):
+            return None
+
+
+@dataclass
 class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
+    resources: ResourceConfig = field(default_factory=ResourceConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     config_path: Optional[str] = None
 
@@ -78,17 +105,19 @@ def get_platform_info() -> dict:
         "python_version": platform.python_version(),
         "gpu_type": "cpu",
         "gpu_available": False,
-        "torch_version": torch.__version__,
+        "torch_version": None,
     }
 
-    if torch.cuda.is_available():
-        info["gpu_type"] = "cuda"
-        info["gpu_available"] = True
-        info["gpu_name"] = torch.cuda.get_device_name(0)
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        info["gpu_type"] = "mps"
-        info["gpu_available"] = True
-        info["gpu_name"] = "Apple Silicon"
+    if _TORCH_AVAILABLE:
+        info["torch_version"] = torch.__version__
+        if torch.cuda.is_available():
+            info["gpu_type"] = "cuda"
+            info["gpu_available"] = True
+            info["gpu_name"] = torch.cuda.get_device_name(0)
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            info["gpu_type"] = "mps"
+            info["gpu_available"] = True
+            info["gpu_name"] = "Apple Silicon"
 
     return info
 
@@ -139,6 +168,18 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             chapter_silence_ms=aud.get("chapter_silence_ms", config.audio.chapter_silence_ms),
             normalization_target_db=aud.get("normalization_target_db", config.audio.normalization_target_db),
             output_formats=aud.get("output_formats", config.audio.output_formats),
+        )
+
+        # Resources
+        res_raw = raw.get("resources", {})
+        config.resources = ResourceConfig(
+            batch_size=str(res_raw.get("batch_size", config.resources.batch_size)),
+            memory_headroom_percent=float(res_raw.get("memory_headroom_percent", config.resources.memory_headroom_percent)),
+            per_segment_cost_gb=float(res_raw.get("per_segment_cost_gb", config.resources.per_segment_cost_gb)),
+            max_batch_size=int(res_raw.get("max_batch_size", config.resources.max_batch_size)),
+            min_batch_size=int(res_raw.get("min_batch_size", config.resources.min_batch_size)),
+            flush_interval=int(res_raw.get("flush_interval", config.resources.flush_interval)),
+            memory_pressure_threshold=float(res_raw.get("memory_pressure_threshold", config.resources.memory_pressure_threshold)),
         )
 
         # Logging

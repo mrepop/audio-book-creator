@@ -64,6 +64,16 @@ voices:
     default_seed: 42
     low_temperature: 0.5  # Lower temp for more consistent output
 
+# Resource management -- controls memory-aware batch sizing
+resources:
+  batch_size: auto         # "auto" to detect from hardware, or integer override
+  memory_headroom_percent: 20   # % of total RAM to keep free
+  per_segment_cost_gb: 1.5      # Estimated memory per segment in a batch
+  max_batch_size: 8              # Upper bound for auto batch sizing
+  min_batch_size: 1              # Lower bound
+  flush_interval: 50             # Flush segment audio to disk every N segments
+  memory_pressure_threshold: 0.85  # Halve batch if memory usage exceeds this (0-1)
+
 # Generation settings
 generation:
   # Hands-free mode defaults
@@ -84,7 +94,7 @@ storage:
 
 # Logging settings
 logging:
-  level: "INFO"
+  level: "DEBUG"
   format: "detailed"
   file_output: true
   log_dir: "logs"
