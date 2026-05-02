@@ -50,9 +50,24 @@ async def upload_book(
 
     file_size = save_path.stat().st_size
 
+    # Try to extract metadata from ebook
+    title = Path(file.filename).stem.replace("_", " ").replace("-", " ").title()
+    author = None
+    if ext == ".epub":
+        try:
+            from src.ebook.epub_parser import EpubParser
+            meta = EpubParser().get_metadata(str(save_path))
+            if meta.get("title"):
+                title = meta["title"]
+            if meta.get("author"):
+                author = meta["author"]
+        except Exception as e:
+            logger.warning(f"Could not extract EPUB metadata: {e}")
+
     # Create DB record
     book = Book(
-        title=Path(file.filename).stem.replace("_", " ").replace("-", " ").title(),
+        title=title,
+        author=author,
         format=SUPPORTED_EXTENSIONS[ext],
         file_path=str(save_path),
         original_filename=file.filename,
