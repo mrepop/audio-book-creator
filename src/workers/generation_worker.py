@@ -12,6 +12,7 @@ Fails immediately if the TTS engine cannot load.
 """
 
 import logging
+import threading
 import time
 import tempfile
 import numpy as np
@@ -25,6 +26,27 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 OUTPUTS_DIR = PROJECT_ROOT / "storage" / "outputs"
 TEMP_DIR = PROJECT_ROOT / "storage" / "temp"
+
+# ---------------------------------------------------------------------------
+# Singleton TTS engine -- shared across all worker calls to avoid loading
+# the model multiple times (each copy is ~8GB on MPS).
+# ---------------------------------------------------------------------------
+_tts_engine = None
+_tts_engine_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Per-job cancellation tokens.  When a resume is requested the old worker
+# thread's event is set so it stops at the next check point.
+# ---------------------------------------------------------------------------
+_job_cancel_events: dict[str, threading.Event] = {}
+
+
+def cancel_worker(job_id: str):
+    """Signal an in-flight worker for *job_id* to stop at its next checkpoint."""
+    ev = _job_cancel_events.get(job_id)
+    if ev is not None:
+        ev.set()
+        logger.info(f"Cancel signal sent to worker for job {job_id}")
 
 
 def run_generation(job_id: str, is_resume: bool = False):
@@ -42,6 +64,16 @@ def run_generation(job_id: str, is_resume: bool = False):
     from src.audio.concatenator import concatenate_segments, concatenate_chapters
     from src.audio.normalizer import loudness_normalize, normalize_audio
     from src.utils.hardware import profile_resources, log_profile, get_memory_pressure, memory_snapshot
+
+    # ---- Cancel any previous worker for this job ----
+    old_event = _job_cancel_events.get(job_id)
+    if old_event is not None:
+        old_event.set()
+        logger.warning(f"Signalled previous worker for job {job_id} to stop")
+
+    # Create a fresh cancellation token for this run
+    cancel_event = threading.Event()
+    _job_cancel_events[job_id] = cancel_event
 
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -122,8 +154,8 @@ def run_generation(job_id: str, is_resume: bool = False):
 
             logger.info(f"Processing {len(chapters)} chapters, {total_segments} segments")
 
-            # Load TTS engine -- fail fast if unavailable
-            tts_engine = _load_tts_engine()
+            # Load TTS engine -- singleton, shared across resume calls
+            tts_engine = _get_tts_engine()
             if tts_engine is None:
                 _fail_job(db, job, "TTS engine failed to load. Check logs for details (model download, MPS issues, etc.)")
                 return
@@ -139,8 +171,8 @@ def run_generation(job_id: str, is_resume: bool = False):
             sample_rate = 24000  # Qwen3 native rate
 
             for ch_idx, chapter in enumerate(chapters):
-                if _is_stopped(db, job):
-                    logger.info(f"Job {job_id} stopped (status={job.status.value})")
+                if cancel_event.is_set() or _is_stopped(db, job):
+                    logger.info(f"Job {job_id} stopped (cancel_event={cancel_event.is_set()}, status={job.status.value})")
                     return
 
                 # ---- Resume: skip fully completed chapters ----
@@ -190,6 +222,14 @@ def run_generation(job_id: str, is_resume: bool = False):
                 current_batch_size = base_batch_size
 
                 for batch_start in range(0, len(segments), current_batch_size):
+                    # ---- Stop check BETWEEN every segment/batch ----
+                    if cancel_event.is_set() or _is_stopped(db, job):
+                        logger.info(
+                            f"Job {job_id} stopped mid-chapter "
+                            f"(cancel_event={cancel_event.is_set()}, status={job.status.value})"
+                        )
+                        return
+
                     # Adaptive batch size: check memory pressure before each batch
                     pressure = get_memory_pressure()
                     if pressure > pressure_threshold:
@@ -389,6 +429,9 @@ def run_generation(job_id: str, is_resume: bool = False):
                     _fail_job(db, job, str(e))
         except Exception:
             pass
+    finally:
+        # Clean up cancellation token
+        _job_cancel_events.pop(job_id, None)
 
 
 def _concatenate_part_files(part_paths: list[str], sample_rate: int) -> np.ndarray:
@@ -403,23 +446,32 @@ def _concatenate_part_files(part_paths: list[str], sample_rate: int) -> np.ndarr
     return np.concatenate(arrays) if arrays else np.array([], dtype=np.float32)
 
 
-def _load_tts_engine():
-    """Load the Qwen3 TTS engine. Returns None if model can't load."""
-    import psutil
-    proc = psutil.Process()
-    logger.info(f"Loading TTS engine... (PID={proc.pid}, RSS={proc.memory_info().rss / (1024**3):.2f}GB)")
-    try:
-        from src.tts.qwen3_engine import Qwen3TTSEngine
-        engine = Qwen3TTSEngine()
-        # Trigger model download/load now so we catch errors early
-        # Timeout after 5 minutes to prevent infinite hangs
-        engine._load_model(timeout_seconds=300)
-        logger.info(f"TTS engine ready (RSS={proc.memory_info().rss / (1024**3):.2f}GB)")
-        return engine
-    except Exception as e:
-        logger.error(f"Qwen3 TTS engine not available: {e}")
-        logger.error("Ensure qwen-tts is installed: pip install -U qwen-tts")
-        return None
+def _get_tts_engine():
+    """Return the singleton TTS engine, loading it on first call.
+
+    The model is ~8GB on MPS. Loading it multiple times (e.g. on resume)
+    was the primary cause of the memory doubling issue.
+    """
+    global _tts_engine
+    with _tts_engine_lock:
+        if _tts_engine is not None:
+            logger.info("Reusing existing TTS engine singleton")
+            return _tts_engine
+
+        import psutil
+        proc = psutil.Process()
+        logger.info(f"Loading TTS engine (first call)... (PID={proc.pid}, RSS={proc.memory_info().rss / (1024**3):.2f}GB)")
+        try:
+            from src.tts.qwen3_engine import Qwen3TTSEngine
+            engine = Qwen3TTSEngine()
+            engine._load_model(timeout_seconds=300)
+            logger.info(f"TTS engine ready (RSS={proc.memory_info().rss / (1024**3):.2f}GB)")
+            _tts_engine = engine
+            return _tts_engine
+        except Exception as e:
+            logger.error(f"Qwen3 TTS engine not available: {e}")
+            logger.error("Ensure qwen-tts is installed: pip install -U qwen-tts")
+            return None
 
 
 def _load_voice_profiles(db, book_id: int) -> dict:

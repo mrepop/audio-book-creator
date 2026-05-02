@@ -81,6 +81,8 @@ async def get_generation_job(job_id: str, db: Session = Depends(get_db)):
 @router.post("/jobs/{job_id}/cancel")
 async def cancel_generation_job(job_id: str, db: Session = Depends(get_db)):
     """Cancel a running generation job."""
+    from src.workers.generation_worker import cancel_worker
+
     job = db.query(GenerationJob).filter(GenerationJob.job_id == job_id).first()
     if not job:
         raise HTTPException(404, "Job not found")
@@ -89,6 +91,8 @@ async def cancel_generation_job(job_id: str, db: Session = Depends(get_db)):
 
     job.status = JobStatus.CANCELLED
     db.commit()
+    # Signal the worker thread to stop immediately
+    cancel_worker(job_id)
     return {"status": "cancelled", "job_id": job_id}
 
 
@@ -105,6 +109,9 @@ async def pause_generation_job(job_id: str, db: Session = Depends(get_db)):
 
     job.status = JobStatus.PAUSED
     db.commit()
+    # Signal the worker thread to stop at next checkpoint
+    from src.workers.generation_worker import cancel_worker
+    cancel_worker(job_id)
     logger.info(f"Job {job_id} paused by user")
     return {"status": "paused", "job_id": job_id}
 
@@ -231,7 +238,7 @@ async def _run_generation(job_id: str, is_resume: bool = False):
 async def _regenerate_segment(segment_id: int):
     """Background task: regenerate a single segment's audio."""
     from src.api.database import get_db_context
-    from src.tts.qwen3_engine import Qwen3TTSEngine
+    from src.workers.generation_worker import _get_tts_engine
 
     try:
         with get_db_context() as db:
@@ -239,7 +246,11 @@ async def _regenerate_segment(segment_id: int):
             if not segment:
                 return
 
-            engine = Qwen3TTSEngine()
+            engine = _get_tts_engine()
+            if engine is None:
+                logger.error(f"Cannot regenerate segment {segment_id}: TTS engine not available")
+                return
+
             text = segment.user_text_override or segment.text
             context = {
                 "emotion": segment.emotion,
