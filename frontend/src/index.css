@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --color-surface: #0a0a0f;
+  --color-surface-raised: #111118;
+  --color-surface-overlay: #18181f;
+  --color-border-subtle: #1e1e2a;
+  --color-border-default: #2a2a3a;
+  --color-accent: #7c5cfc;
+  --color-accent-hover: #8e72ff;
+  --color-accent-muted: rgba(124, 92, 252, 0.15);
+  --color-success: #22c55e;
+  --color-warning: #eab308;
+  --color-danger: #ef4444;
+}
+
+html, body, #root { height: 100%; }
+html { scroll-behavior: smooth; }
+::selection { background: var(--color-accent-muted); color: #fff; }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3a3a4a; }
+
+.glass {
+  background: rgba(17, 17, 24, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--color-border-subtle);
+}
+
+.ring-glow:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--color-accent);
+}
+
+.text-gradient {
+  background: linear-gradient(135deg, #7c5cfc 0%, #c084fc 50%, #7c5cfc 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
