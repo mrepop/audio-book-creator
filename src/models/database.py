@@ -10,12 +10,33 @@ import json
 from datetime import datetime, timezone
 from sqlalchemy import (
     Column, Integer, String, Text, Float, Boolean, DateTime,
-    ForeignKey, Enum, JSON, create_engine
+    ForeignKey, Enum, JSON, create_engine, TypeDecorator
 )
 from sqlalchemy.orm import declarative_base, relationship, Session
 from sqlalchemy.sql import func
 
 Base = declarative_base()
+
+
+class TZDateTime(TypeDecorator):
+    """A DateTime type that ensures timezone-aware (UTC) datetimes.
+
+    SQLite does not store timezone info, so naive datetimes are returned
+    on read.  This decorator re-attaches UTC on the way out and normalises
+    to UTC on the way in, preventing 'offset-naive vs offset-aware' errors.
+    """
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is not None and value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value
+
+    def process_result_value(self, value, dialect):
+        if value is not None and value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value
 
 
 class JobStatus(enum.Enum):
@@ -28,6 +49,7 @@ class JobStatus(enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    PAUSED = "paused"
 
 
 class SegmentType(enum.Enum):
@@ -68,11 +90,11 @@ class Book(Base):
     # Processing state
     is_parsed = Column(Boolean, default=False)
     is_analyzed = Column(Boolean, default=False)  # NLP analysis complete
-    parsed_at = Column(DateTime, nullable=True)
-    analyzed_at = Column(DateTime, nullable=True)
+    parsed_at = Column(TZDateTime, nullable=True)
+    analyzed_at = Column(TZDateTime, nullable=True)
 
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(TZDateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(TZDateTime, onupdate=lambda: datetime.now(timezone.utc))
 
     # Relationships
     chapters = relationship("Chapter", back_populates="book", cascade="all, delete-orphan")
@@ -96,7 +118,7 @@ class Chapter(Base):
     audio_duration_seconds = Column(Float, nullable=True)
     is_generated = Column(Boolean, default=False)
 
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(TZDateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
     book = relationship("Book", back_populates="chapters")
@@ -130,8 +152,8 @@ class VoiceProfile(Base):
     settings_json = Column(Text, nullable=True)
 
     is_default = Column(Boolean, default=False)  # Is this the narrator default?
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(TZDateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(TZDateTime, onupdate=lambda: datetime.now(timezone.utc))
 
     # Relationships
     characters = relationship("Character", back_populates="voice_profile")
@@ -165,8 +187,8 @@ class Character(Base):
     dialogue_count = Column(Integer, default=0)
     first_appearance_chapter = Column(Integer, nullable=True)
 
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(TZDateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(TZDateTime, onupdate=lambda: datetime.now(timezone.utc))
 
     # Relationships
     book = relationship("Book", back_populates="characters")
@@ -203,7 +225,7 @@ class Segment(Base):
     user_emphasis_override = Column(String(50), nullable=True)
     user_text_override = Column(Text, nullable=True)  # User-edited text for this segment
 
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(TZDateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
     chapter = relationship("Chapter", back_populates="segments")
@@ -237,9 +259,13 @@ class GenerationJob(Base):
 
     # Timing
     error_message = Column(Text, nullable=True)
-    started_at = Column(DateTime, nullable=True)
-    completed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    started_at = Column(TZDateTime, nullable=True)
+    completed_at = Column(TZDateTime, nullable=True)
+    resumed_at = Column(TZDateTime, nullable=True)
+    created_at = Column(TZDateTime, default=lambda: datetime.now(timezone.utc))
+
+    # Resume tracking
+    resume_count = Column(Integer, default=0)
 
     # Relationships
     book = relationship("Book", back_populates="generation_jobs")
