@@ -322,7 +322,7 @@ export default function GenerationPage() {
                 onChange={e => setSelectedBook(bookList.find(b => b.id === Number(e.target.value)) ?? null)}
                 className="rounded-lg border border-border-default bg-surface-raised px-3 py-2 text-sm text-zinc-200 focus:border-accent focus:outline-none">
                 <option value="">Select a book...</option>
-                {bookList.filter(b => b.is_analyzed).map(b => <option key={b.id} value={b.id}>{b.title}</option>)}
+                {bookList.filter(b => b.is_parsed).map(b => <option key={b.id} value={b.id}>{b.title}</option>)}
               </select>
               {selectedBook && <span className="text-xs text-zinc-500">{chapters.length} chapters</span>}
             </div>
