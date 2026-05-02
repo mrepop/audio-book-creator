@@ -8,11 +8,14 @@ Uses the official qwen-tts package with the CustomVoice model for:
 - Deterministic generation via temperature/seed control
 """
 
+import gc
 import logging
 from typing import Optional, Tuple, Dict
 
 import torch
 import numpy as np
+
+from src.utils.hardware import memory_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -217,30 +220,41 @@ class Qwen3TTSEngine:
         )
 
         try:
-            wavs, sr = model.generate_custom_voice(
-                text=text,
-                language=language,
-                speaker=speaker,
-                instruct=instruct if instruct else None,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                max_new_tokens=2048,
-            )
+            memory_snapshot("segment:pre-generate")
+
+            # inference_mode disables autograd graph construction, preventing
+            # the computation graph from accumulating in memory across calls
+            with torch.inference_mode():
+                wavs, sr = model.generate_custom_voice(
+                    text=text,
+                    language=language,
+                    speaker=speaker,
+                    instruct=instruct if instruct else None,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    max_new_tokens=2048,
+                )
 
             if not wavs or len(wavs[0]) == 0:
                 raise ValueError("Empty waveform returned")
 
             audio = wavs[0]
-            # Move to CPU numpy immediately
+            # Move to CPU numpy immediately -- copy=True severs any shared
+            # memory between the numpy array and the backing torch tensor
+            # so the tensor can be fully freed
             if isinstance(audio, torch.Tensor):
-                audio = audio.detach().cpu().float().numpy()
-            audio = np.array(audio, dtype=np.float32, copy=False)
+                audio = audio.detach().cpu().float().numpy().copy()
+            else:
+                audio = np.array(audio, dtype=np.float32, copy=True)
 
             logger.debug(f"Generated {len(audio)/sr:.2f}s audio at {sr}Hz")
 
+            # Explicitly delete all references to model output tensors
             del wavs
             self._flush_gpu_cache()
+
+            memory_snapshot("segment:post-generate+flush")
 
             return audio, sr
 
@@ -319,26 +333,36 @@ class Qwen3TTSEngine:
             # Clean up None instructions to empty strings
             clean_instructions = [inst if inst else "" for inst in instructions]
 
-            wavs, sr = model.generate_custom_voice(
-                text=texts,
-                language=[language] * batch_size,
-                speaker=speakers,
-                instruct=clean_instructions if any(clean_instructions) else None,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                max_new_tokens=2048,
-            )
+            memory_snapshot("batch:pre-generate")
+
+            # inference_mode disables autograd graph construction, preventing
+            # the computation graph from accumulating in memory across calls
+            with torch.inference_mode():
+                wavs, sr = model.generate_custom_voice(
+                    text=texts,
+                    language=[language] * batch_size,
+                    speaker=speakers,
+                    instruct=clean_instructions if any(clean_instructions) else None,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    max_new_tokens=2048,
+                )
+
+            memory_snapshot("batch:post-generate")
 
             # Move results to CPU numpy immediately to free GPU/MPS tensors
+            # copy=True severs shared memory between numpy and torch tensors
             results = []
             for i, wav in enumerate(wavs):
                 if wav is not None and len(wav) > 0:
-                    # Ensure we have a CPU numpy array, not a GPU tensor
                     if isinstance(wav, torch.Tensor):
-                        wav = wav.detach().cpu().float().numpy()
-                    results.append((np.array(wav, dtype=np.float32, copy=False), sr))
-                    logger.debug(f"  Batch [{i+1}/{batch_size}]: {len(wav)/sr:.2f}s")
+                        audio_np = wav.detach().cpu().float().numpy().copy()
+                    else:
+                        audio_np = np.array(wav, dtype=np.float32, copy=True)
+                    results.append((audio_np, sr))
+                    logger.debug(f"  Batch [{i+1}/{batch_size}]: {len(audio_np)/sr:.2f}s")
+                    del wav, audio_np
                 else:
                     # Fallback: silence for failed segments
                     word_count = len(texts[i].split())
@@ -350,6 +374,8 @@ class Qwen3TTSEngine:
             del wavs
             self._flush_gpu_cache()
 
+            memory_snapshot("batch:post-flush")
+
             return results
 
         except Exception as e:
@@ -359,12 +385,19 @@ class Qwen3TTSEngine:
 
     def _flush_gpu_cache(self):
         """Force-release cached GPU/MPS memory back to the OS."""
-        import gc
+        # Full GC pass first to break reference cycles
         gc.collect()
+        gc.collect()  # Second pass catches ref cycles freed by first pass
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
         if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
             torch.mps.empty_cache()
+            # Synchronize MPS to ensure all GPU ops complete before
+            # we measure memory -- without this, deferred MPS ops
+            # can hold onto buffers
+            if hasattr(torch.mps, "synchronize"):
+                torch.mps.synchronize()
 
     def cleanup(self):
         """Free model resources."""

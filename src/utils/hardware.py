@@ -6,10 +6,12 @@ for TTS generation based on available resources.  Provides runtime memory
 monitoring so the worker can adapt under pressure.
 """
 
+import gc
 import logging
 import os
 import platform
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -22,6 +24,109 @@ try:
     _TORCH_AVAILABLE = True
 except ImportError:
     _TORCH_AVAILABLE = False
+
+
+# ---------------------------------------------------------------------------
+# Memory diagnostic snapshot
+# ---------------------------------------------------------------------------
+
+_BASELINE_RSS: Optional[float] = None  # Set once at first snapshot
+
+
+def memory_snapshot(label: str = "", log_level: int = logging.INFO) -> dict:
+    """
+    Log a detailed memory snapshot and return the raw numbers.
+
+    Includes:
+      - Process RSS (resident), VMS (virtual)
+      - System RAM used / total / available / percent
+      - Swap used / total
+      - MPS allocator stats (current, peak) when on Apple Silicon
+      - Live torch.Tensor count and estimated size
+      - Delta vs first-ever snapshot (baseline)
+    """
+    global _BASELINE_RSS
+
+    proc = psutil.Process()
+    mem_info = proc.memory_info()
+    vm = psutil.virtual_memory()
+    swap = psutil.swap_memory()
+
+    rss_gb = mem_info.rss / (1024 ** 3)
+    vms_gb = mem_info.vms / (1024 ** 3)
+    sys_used_gb = vm.used / (1024 ** 3)
+    sys_total_gb = vm.total / (1024 ** 3)
+    sys_avail_gb = vm.available / (1024 ** 3)
+    swap_used_gb = swap.used / (1024 ** 3)
+    swap_total_gb = swap.total / (1024 ** 3)
+
+    if _BASELINE_RSS is None:
+        _BASELINE_RSS = rss_gb
+    delta_gb = rss_gb - _BASELINE_RSS
+
+    # Torch tensor census
+    tensor_count = 0
+    tensor_bytes = 0
+    mps_current_mb = 0.0
+    mps_peak_mb = 0.0
+    if _TORCH_AVAILABLE:
+        for obj in gc.get_objects():
+            try:
+                if isinstance(obj, torch.Tensor):
+                    tensor_count += 1
+                    tensor_bytes += obj.nelement() * obj.element_size()
+            except (ReferenceError, RuntimeError):
+                pass
+        tensor_mb = tensor_bytes / (1024 ** 2)
+
+        # MPS allocator stats (Apple Silicon only)
+        if hasattr(torch, "mps") and hasattr(torch.mps, "current_allocated_memory"):
+            try:
+                mps_current_mb = torch.mps.current_allocated_memory() / (1024 ** 2)
+            except Exception:
+                pass
+        if hasattr(torch, "mps") and hasattr(torch.mps, "driver_allocated_memory"):
+            try:
+                mps_peak_mb = torch.mps.driver_allocated_memory() / (1024 ** 2)
+            except Exception:
+                pass
+    else:
+        tensor_mb = 0.0
+
+    # Python object census (rough)
+    gc_counts = gc.get_count()  # (gen0, gen1, gen2)
+
+    snap = {
+        "rss_gb": rss_gb,
+        "vms_gb": vms_gb,
+        "delta_gb": delta_gb,
+        "sys_used_gb": sys_used_gb,
+        "sys_total_gb": sys_total_gb,
+        "sys_avail_gb": sys_avail_gb,
+        "sys_percent": vm.percent,
+        "swap_used_gb": swap_used_gb,
+        "swap_total_gb": swap_total_gb,
+        "tensor_count": tensor_count,
+        "tensor_mb": tensor_mb,
+        "mps_current_mb": mps_current_mb,
+        "mps_peak_mb": mps_peak_mb,
+        "gc_counts": gc_counts,
+    }
+
+    tag = f"[MEM {label}]" if label else "[MEM]"
+    logger.log(
+        log_level,
+        f"{tag}  "
+        f"RSS={rss_gb:.2f}GB (delta {'+' if delta_gb >= 0 else ''}{delta_gb:.2f}GB)  |  "
+        f"VMS={vms_gb:.2f}GB  |  "
+        f"SYS={sys_used_gb:.1f}/{sys_total_gb:.1f}GB ({vm.percent}%)  |  "
+        f"SWAP={swap_used_gb:.1f}/{swap_total_gb:.1f}GB  |  "
+        f"Tensors={tensor_count} ({tensor_mb:.0f}MB)  |  "
+        f"MPS alloc={mps_current_mb:.0f}MB driver={mps_peak_mb:.0f}MB  |  "
+        f"GC={gc_counts}"
+    )
+
+    return snap
 
 # ---- Constants ----
 # Approximate memory footprint of the Qwen3-TTS 1.7B model by dtype

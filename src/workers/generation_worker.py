@@ -41,10 +41,12 @@ def run_generation(job_id: str, is_resume: bool = False):
     from src.models import GenerationJob, Book, Chapter, Segment, VoiceProfile, Character, JobStatus
     from src.audio.concatenator import concatenate_segments, concatenate_chapters
     from src.audio.normalizer import loudness_normalize, normalize_audio
-    from src.utils.hardware import profile_resources, log_profile, get_memory_pressure
+    from src.utils.hardware import profile_resources, log_profile, get_memory_pressure, memory_snapshot
 
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
+    memory_snapshot("worker:startup")
 
     # ---- Resource profiling ----
     config = get_config()
@@ -125,6 +127,8 @@ def run_generation(job_id: str, is_resume: bool = False):
             if tts_engine is None:
                 _fail_job(db, job, "TTS engine failed to load. Check logs for details (model download, MPS issues, etc.)")
                 return
+
+            memory_snapshot("worker:post-model-load")
 
             # Build speaker assignments per character
             speaker_map = _build_speaker_map(db, book.id)
@@ -226,7 +230,7 @@ def run_generation(job_id: str, is_resume: bool = False):
                         _fail_job(db, job, f"TTS batch generation failed on chapter {chapter.number}: {e}")
                         return
 
-                    # Process results
+                    # Process results -- copy audio and release batch_results
                     for i, (audio_array, sr) in enumerate(batch_results):
                         seg = batch_segs[i]
                         segment_audio_arrays.append(audio_array)
@@ -234,6 +238,7 @@ def run_generation(job_id: str, is_resume: bool = False):
                         seg.audio_duration_seconds = len(audio_array) / sample_rate
                         completed_segments += 1
                         unflushed_count += 1
+                    del batch_results  # Release references
 
                     # ---- Flush to disk if we've accumulated enough segments ----
                     if unflushed_count >= flush_interval:
@@ -247,8 +252,10 @@ def run_generation(job_id: str, is_resume: bool = False):
                             f"Flushed {len(segment_audio_arrays)} segments to {Path(flush_path).name} "
                             f"({len(part_audio)/sample_rate:.1f}s)"
                         )
+                        del part_audio
                         segment_audio_arrays.clear()
                         unflushed_count = 0
+                        memory_snapshot(f"worker:post-flush ch{chapter.number}")
 
                     # Update progress after each batch
                     job.completed_segments = completed_segments
@@ -263,13 +270,17 @@ def run_generation(job_id: str, is_resume: bool = False):
                         f"ETA: {int(remaining // 60)}m {int(remaining % 60)}s"
                     )
                     db.commit()
-                    # Log RSS to track memory between batches
-                    import psutil
-                    rss_gb = psutil.Process().memory_info().rss / (1024 ** 3)
+
+                    # Full memory snapshot after every batch
+                    snap = memory_snapshot(
+                        f"worker:batch-done seg={completed_segments}/{total_segments} "
+                        f"ch={chapter.number}/{len(chapters)}"
+                    )
                     logger.info(
                         f"Batch complete: {completed_segments}/{total_segments} "
                         f"({job.progress:.1f}%) | batch={current_batch_size} | "
-                        f"rate={rate:.2f} seg/s | ETA={int(remaining)}s | RSS={rss_gb:.1f}GB"
+                        f"rate={rate:.2f} seg/s | ETA={int(remaining)}s | "
+                        f"arrays_held={len(segment_audio_arrays)}"
                     )
 
                 # ---- Assemble chapter from flushed parts + remaining segments ----
@@ -329,6 +340,8 @@ def run_generation(job_id: str, is_resume: bool = False):
                     # Release chapter audio from memory
                     del chapter_audio
 
+                    memory_snapshot(f"worker:chapter-{chapter.number}-done")
+
             # Concatenate all chapters into final audiobook
             if not chapter_audio_paths:
                 _fail_job(db, job, "No chapter audio generated")
@@ -343,8 +356,10 @@ def run_generation(job_id: str, is_resume: bool = False):
             output_filename = f"{safe_title}_{job_id[:8]}.wav"
             output_path = str(OUTPUTS_DIR / output_filename)
 
+            memory_snapshot("worker:pre-final-assembly")
             logger.info(f"Assembling {len(chapter_audio_paths)} chapters into {output_filename}")
             concatenate_chapters(chapter_audio_paths, output_path, sample_rate=sample_rate)
+            memory_snapshot("worker:post-final-assembly")
 
             # Mark complete
             job.status = JobStatus.COMPLETED
