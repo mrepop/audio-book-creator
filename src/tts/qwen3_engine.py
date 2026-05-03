@@ -10,6 +10,7 @@ Uses the official qwen-tts package with the CustomVoice model for:
 
 import gc
 import logging
+import threading
 from typing import Optional, Tuple, Dict
 
 import torch
@@ -383,6 +384,11 @@ class Qwen3TTSEngine:
             self._flush_gpu_cache()
             raise
 
+    # Lock to serialize all MPS generate calls. Metal command buffers
+    # crash with "commit command buffer with uncommitted encoder" if
+    # two threads submit simultaneously (e.g. generation + preview).
+    _generate_lock = threading.Lock()
+
     def generate_chunks(
         self,
         chunks,
@@ -429,7 +435,7 @@ class Qwen3TTSEngine:
             try:
                 memory_snapshot(f"chunk:{i+1}/{len(chunks)}:pre")
 
-                with torch.inference_mode():
+                with self._generate_lock, torch.inference_mode():
                     wavs, sr = model.generate_custom_voice(
                         text=text,
                         language=language,
