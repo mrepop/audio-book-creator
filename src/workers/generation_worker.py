@@ -227,7 +227,7 @@ def run_generation(job_id: str, is_resume: bool = False):
 
                 segment_audio_paths = []       # Paths to segment WAV files on disk
                 paragraph_end_flags = []       # For chapter-level splicing
-                BATCH_SEGMENTS = 8             # Process N segments per batch before progress update
+                BATCH_SEGMENTS = 12            # Process N segments per batch before progress update
 
                 for batch_start in range(0, len(segments), BATCH_SEGMENTS):
                     # ---- Stop check before each batch ----
