@@ -1,165 +1,167 @@
 # Audio Book Creator
 
-Convert ebooks into high-quality audiobooks with ultra-realistic, context-aware voices using Qwen3 TTS.
+Convert ebooks into full audiobooks using Qwen3-TTS with character voice assignment, sentence-level chunking, and production-quality audio splicing.
 
 ## Features
 
-- **Ultra-Realistic Voices**: Qwen3-TTS generates voices indistinguishable from human narration
-- **Seamless Audio**: No chopping, no clipping -- clear cadence, tempo, and vocal patterns via crossfade concatenation
-- **Context-Aware Speech**: NLP-driven emotion detection, emphasis, pacing, and tone analysis for each segment
-- **Web Interface**: Full control over character voices, sentence-level editing, and generation parameters
-- **Deterministic Voices**: Consistent character voices across the entire book via seed-based generation and voice profiles
-- **Dramatis Personae**: Auto-generated character sheet with inferred voice traits -- easy customization per character
-- **Hands-Free Mode**: Fully automated audiobook generation with best-effort voice assignment and context analysis
+### Core Pipeline
+- EPUB parsing with automatic title/author metadata extraction
+- NLP analysis: character detection via spaCy NER, dialogue attribution, gender inference, auto voice profile creation
+- Sentence-level chunking: splits text at sentence boundaries, targets 12-15 second chunks for optimal Qwen3 quality
+- Qwen3-TTS CustomVoice integration with 9 preset speakers (Ryan, Aiden, Vivian, Serena, etc.)
+- Instruction-based emotion control: emotion, emphasis, and pacing per segment via natural language instruct parameter
+- Hann-window crossfade splicing with per-chunk LUFS normalization for seamless audio joins
+- Chapter assembly from disk-based segment audio files
+- Full audiobook concatenation with chapter silence gaps
 
-## Architecture
+### Generation Studio (Frontend)
+- Three generation modes:
+  - Auto: one-click full audiobook generation with defaults
+  - Chapter: select and generate individual chapters with preview
+  - Sentence: drill down to individual segments with editable emotion/emphasis/pacing, inline audio preview, and regeneration
+- Job management: pause, resume, cancel with real-time progress tracking
+- Crash recovery: orphaned GENERATING jobs auto-marked as FAILED on restart, resumable
+- Segment preview: generate and play audio for a single segment via inline audio player
+
+### Memory Management
+- Patched PyTorch MPS graph cache: locally applied PyTorch PR #181485 to clear MPSGraphCache on empty_cache(), fixing the unbounded Metal driver memory leak
+- System-level memory guard: checks psutil.virtual_memory().available before each generate call, cycles engine if available RAM drops below 16GB, fails gracefully below 8GB
+- Singleton TTS engine: model loaded once, shared across all worker threads and resume calls
+- Disk-based chapter assembly: segment audio written to WAV files immediately, not held in memory arrays
+- Per-batch empty_cache() + synchronize(): clears MPS graph cache between segment batches
+
+### Concurrency and Reliability
+- Per-job cancellation tokens via threading.Event -- pause/cancel signal delivered immediately
+- Stop checks between every segment -- responds to pause within seconds
+- Metal command buffer serialization via _generate_lock -- prevents concurrent MPS submissions from crashing
+- 40 concurrent jobs supported -- GPU work serialized through lock, CPU work (chunking, splicing, I/O) runs in parallel
+
+### Audio Quality
+- repetition_penalty=1.05 prevents Qwen3 stuttering/looping artifacts
+- max_new_tokens capped per chunk based on estimated duration (12Hz * 2.5x headroom) -- prevents runaway generation producing garbage
+- Temperature 0.7 for voice consistency across chunks
+- Deterministic seeds with per-chunk offset for reproducibility with variety
+
+## Tech Stack
+
+- Backend: Python 3.12, FastAPI, SQLAlchemy, SQLite
+- Frontend: React 18, TypeScript, Vite, TailwindCSS, Lucide icons
+- TTS: Qwen3-TTS-12Hz-1.7B-CustomVoice via qwen-tts package
+- Audio: soundfile, numpy, librosa (resampling)
+- ML: PyTorch 2.11 (locally patched for MPS graph cache fix)
+- NLP: spaCy (en_core_web_sm)
+
+## Requirements
+
+- Python 3.12+
+- macOS with Apple Silicon (MPS) or Linux with CUDA
+- 16GB+ RAM (128GB recommended for full book generation)
+- ~8GB for model weights
+
+## Quick Start
+
+```bash
+# 1. Clone and set up
+git clone https://github.com/mrepop/audio-book-creator.git
+cd audio-book-creator
+python3.12 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# 2. Install frontend dependencies
+cd frontend && npm install && cd ..
+
+# 3. Start both servers
+bash scripts/dev.sh
+
+# 4. Open http://localhost:5173
+```
+
+## Project Structure
 
 ```
 audio-book-creator/
   src/
-    api/           # FastAPI application, routes, schemas, config
-    models/        # SQLAlchemy database models
-    ebook/         # Ebook parsing (EPUB, PDF, TXT)
-    nlp/           # Character detection, dialogue parsing, context analysis
-    tts/           # Qwen3 TTS engine, voice profile management
-    audio/         # Prosody analysis, concatenation, normalization
-    workers/       # Background job processing
-    services/      # Business logic layer
-  frontend/        # React + TypeScript web UI (planned)
-  storage/         # Books, voices, outputs, temp files
-  tests/           # Unit and integration tests
-  config.yaml      # Application configuration
+    api/              - FastAPI app, routes, config, database
+      main.py         - Server startup, logging, crash recovery
+      config.py       - YAML config loader with ChunkingConfig
+      routes/         - books, characters, voices, generation endpoints
+      schemas.py      - Pydantic models
+    audio/            - Audio processing
+      splicer.py      - Hann crossfade + LUFS normalization
+      concatenator.py
+      normalizer.py
+    tts/              - TTS engine
+      qwen3_engine.py - Qwen3 wrapper with generate_chunks, MPS lock
+      chunker.py      - Sentence-level text splitter
+    workers/          - Background job processing
+      generation_worker.py - Main pipeline with batching + cleanup
+    nlp/              - NLP analysis
+      character_detector.py
+      dialogue_parser.py
+      context_analyzer.py
+    ebook/            - Book parsing
+      epub_parser.py
+    models/           - SQLAlchemy models
+      database.py     - TZDateTime, JobStatus, all models
+    utils/
+      hardware.py     - Memory diagnostics, system memory guard
+  frontend/
+    src/
+      pages/          - LibraryPage, BookDetailPage, GenerationPage, VoiceStudioPage
+      lib/api.ts      - Typed API client
+      App.tsx          - Router + layout
+  tests/
+    unit/             - test_chunker, test_splicer, test_hardware, test_resume, test_tz_datetime
+  scripts/
+    dev.sh            - Start backend + frontend
+    measure_memory_leak.py - OS-level memory measurement tool
+  config.yaml         - All configuration
+  storage/            - Books, voices, outputs, temp files
 ```
-
-## Technology Stack
-
-- **Backend**: Python 3.12, FastAPI, SQLAlchemy
-- **TTS**: Qwen3-TTS-12Hz-1.7B-Base (via qwen-tts)
-- **NLP**: spaCy (character detection, context analysis)
-- **Audio**: librosa, soundfile, pydub, numpy
-- **Ebook**: ebooklib (EPUB), PyPDF2 (PDF), plain text
-- **Frontend**: React + TypeScript (planned)
-- **Database**: SQLite (dev) / PostgreSQL (prod)
-
-## Requirements
-
-- Python 3.10-3.12
-- 16GB+ RAM recommended
-- GPU optional but recommended (CUDA/MPS) for TTS generation
-- 10GB+ storage for TTS models
-
-## Quick Start
-
-### 1. Clone and setup
-
-```bash
-git clone https://github.com/mrepop/audio-book-creator.git
-cd audio-book-creator
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-### 2. Download spaCy model
-
-```bash
-python -m spacy download en_core_web_sm
-```
-
-### 3. Start the server
-
-```bash
-python -m src.api.main
-```
-
-### 4. Open the API
-
-- API docs: http://localhost:8000/docs
-- Health check: http://localhost:8000/health
-
-## API Endpoints
-
-### Books
-- `POST /api/books/upload` - Upload an ebook (EPUB, PDF, TXT)
-- `GET /api/books/` - List all books
-- `GET /api/books/{id}` - Get book details with chapters
-- `POST /api/books/{id}/parse` - Parse book into chapters
-- `POST /api/books/{id}/analyze` - Run NLP analysis (character detection, context)
-- `GET /api/books/{id}/dramatis-personae` - Get character sheet
-
-### Characters
-- `GET /api/characters/book/{book_id}` - List characters for a book
-- `PATCH /api/characters/{id}` - Update character details/voice assignment
-
-### Voice Profiles
-- `POST /api/voices/` - Create voice profile
-- `GET /api/voices/` - List all voice profiles
-- `PATCH /api/voices/{id}` - Update voice settings
-- `POST /api/voices/{id}/reference-audio` - Upload reference audio
-
-### Generation
-- `POST /api/generation/jobs` - Create audiobook generation job
-- `GET /api/generation/jobs/{id}` - Get job status/progress
-- `POST /api/generation/jobs/{id}/cancel` - Cancel a job
-- `GET /api/generation/jobs/{id}/download` - Download completed audiobook
-
-### Segment Editing
-- `GET /api/generation/chapters/{id}/segments` - List segments for editing
-- `PATCH /api/generation/segments/{id}` - Update segment text/emphasis/voice
-- `POST /api/generation/segments/{id}/regenerate` - Regenerate single segment audio
 
 ## Configuration
 
-All settings are in `config.yaml`. Key sections:
+All settings in config.yaml:
 
-- **server**: Host, port, reload settings
-- **tts**: Qwen3 model, temperature, sampling parameters
-- **audio**: Sample rates, crossfade, silence durations, normalization
-- **nlp**: spaCy model, context analysis toggles
-- **voices**: Narrator defaults, deterministic seed settings
-- **generation**: Auto-mode settings, job concurrency
+- chunking: target_chunk_seconds=12, max_chunk_seconds=15, crossfade_ms=100, sentence_silence_ms=200, paragraph_silence_ms=500
+- resources: batch_size=1 (MPS), memory_pressure_threshold=0.85
+- generation: max_concurrent_jobs=40, checkpoint_interval=10
+- tts.qwen3: default_temperature=0.7, repetition_penalty=1.05, max_new_tokens=2048
+- audio: sample_rate=24000, normalization_target_db=-16
 
-Override via environment variables:
+## Known Issues
+
+- PyTorch MPS graph cache: requires locally patched PyTorch (PR #181485) to prevent unbounded memory growth. Without the patch, empty_cache() does not clear the MPSGraphCache and memory grows ~300MB per generate call. The patch source is at /tmp/pytorch-patch.
+- Runaway generation: some texts cause Qwen3 to generate far longer audio than expected. Mitigated by capping max_new_tokens per chunk, but occasional long outputs still occur.
+- Single GPU serialization: all TTS calls serialized through one lock on MPS since Metal command queues are not thread-safe. True parallelism requires multiple GPUs or CPU fallback.
+- Character detection accuracy: NER sometimes misidentifies places/objects as characters. Gender inference uses pronoun proximity which can be inaccurate for minor characters.
+- Frontend preview playback: the Chapter and Sentence mode preview buttons may not work if a generation job is actively running (GPU lock contention).
+
+## API Endpoints
+
+- POST /api/books/upload - Upload EPUB/PDF/TXT
+- POST /api/books/{id}/parse - Parse into chapters
+- POST /api/books/{id}/analyze - NLP character detection
+- POST /api/generation/jobs - Start generation job
+- POST /api/generation/jobs/{id}/pause - Pause job
+- POST /api/generation/jobs/{id}/resume - Resume job
+- POST /api/generation/jobs/{id}/cancel - Cancel job
+- GET /api/generation/jobs/{id}/download - Download audiobook
+- POST /api/generation/segments/{id}/preview - Preview segment audio
+- PATCH /api/generation/segments/{id} - Update segment params
+- GET /api/generation/chapters/{id}/segments - List chapter segments
+
+## Development
+
 ```bash
-export SERVER_PORT=9000
-export LOG_LEVEL=DEBUG
-export TTS_ENGINE=qwen3
+# Run tests
+venv/bin/python -m pytest tests/ -v
+
+# Memory leak measurement
+venv/bin/python scripts/measure_memory_leak.py --calls 20
 ```
-
-## How It Works
-
-1. **Upload**: User uploads an ebook (EPUB, PDF, or TXT)
-2. **Parse**: System extracts chapters and identifies structure
-3. **Analyze**: NLP engine detects characters, parses dialogue, analyzes context (emotion, emphasis, pacing)
-4. **Dramatis Personae**: Character sheet generated with inferred voice traits
-5. **Customize** (optional): User tweaks character voices, edits segments
-6. **Generate**: Qwen3 TTS produces audio segment-by-segment with context-aware parameters
-7. **Assemble**: Segments concatenated with crossfading, normalized, exported as MP3/M4B/WAV
-
-## Project Status
-
-### Phase 1: Foundation [COMPLETE]
-- Project structure and configuration
-- Database models (Book, Chapter, Character, VoiceProfile, Segment, GenerationJob)
-- FastAPI application with full CRUD API
-- Ebook parsing (EPUB, TXT)
-- NLP module (character detection, context analysis, dialogue parsing)
-- Qwen3 TTS engine wrapper with voice profiles
-- Audio processing (prosody, concatenation, normalization)
-
-### Phase 2: Generation Pipeline [PLANNED]
-- Full end-to-end generation pipeline
-- Hands-free automated mode
-- Progress tracking and checkpointing
-- Chapter-by-chapter generation with voice consistency
-
-### Phase 3: Web Interface [PLANNED]
-- React + TypeScript frontend
-- Book upload and management UI
-- Dramatis personae editor
-- Sentence-level editing
-- Audio player with chapter navigation
 
 ## License
 
-MIT
+Proprietary - Seventh Dominion
