@@ -227,7 +227,7 @@ def run_generation(job_id: str, is_resume: bool = False):
 
                 segment_audio_paths = []       # Paths to segment WAV files on disk
                 paragraph_end_flags = []       # For chapter-level splicing
-                BATCH_SEGMENTS = 4             # Process N segments per batch before cleanup
+                BATCH_SEGMENTS = 8             # Process N segments per batch before progress update
 
                 for batch_start in range(0, len(segments), BATCH_SEGMENTS):
                     # ---- Stop check before each batch ----
@@ -337,10 +337,15 @@ def run_generation(job_id: str, is_resume: bool = False):
                         )
                         del seg_audio
 
-                    # ---- Post-batch cleanup: cycle MPS to reclaim graph cache ----
-                    _cycle_tts_engine()
-                    tts_engine = _get_tts_engine()
-                    memory_snapshot(f"worker:post-batch-reset ch{chapter.number}")
+                    # ---- Post-batch cleanup: flush MPS graph cache ----
+                    # With the patched PyTorch (PR #181485), empty_cache()
+                    # now clears the MPSGraphCache, so we don't need to
+                    # destroy and reload the model (~4s overhead per cycle).
+                    import torch
+                    torch.mps.empty_cache()
+                    if hasattr(torch.mps, "synchronize"):
+                        torch.mps.synchronize()
+                    memory_snapshot(f"worker:post-batch-flush ch{chapter.number}")
 
                     # Update progress
                     job.completed_segments = completed_segments
