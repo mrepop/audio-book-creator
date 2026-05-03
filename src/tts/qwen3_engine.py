@@ -223,9 +223,7 @@ class Qwen3TTSEngine:
         try:
             memory_snapshot("segment:pre-generate")
 
-            # inference_mode disables autograd graph construction, preventing
-            # the computation graph from accumulating in memory across calls
-            with torch.inference_mode():
+            with self._generate_lock, torch.inference_mode():
                 wavs, sr = model.generate_custom_voice(
                     text=text,
                     language=language,
@@ -234,6 +232,7 @@ class Qwen3TTSEngine:
                     temperature=temperature,
                     top_k=top_k,
                     top_p=top_p,
+                    repetition_penalty=1.05,
                     max_new_tokens=2048,
                 )
 
@@ -422,13 +421,19 @@ class Qwen3TTSEngine:
 
         for i, chunk in enumerate(chunks):
             text = chunk.text if hasattr(chunk, "text") else str(chunk)
-            est = f"~{chunk.estimated_duration:.1f}s" if hasattr(chunk, "estimated_duration") else "?"
+            est_dur = chunk.estimated_duration if hasattr(chunk, "estimated_duration") else 15.0
+            est = f"~{est_dur:.1f}s"
 
-            logger.info(f"Chunk {i+1}/{len(chunks)}: {est} | '{text[:60]}...'")
+            # Cap max_new_tokens based on estimated duration to prevent
+            # runaway generation. At 12Hz, 1s = 12 tokens. Allow 2.5x
+            # headroom, floor at 180 tokens (15s).
+            max_tokens = max(180, min(2048, int(est_dur * 12 * 2.5)))
+
+            logger.info(f"Chunk {i+1}/{len(chunks)}: {est} | max_tokens={max_tokens} | '{text[:60]}...'")
 
             # Set seed before each chunk for reproducibility
             if seed is not None:
-                torch.manual_seed(seed + i)  # Offset by index for variety within consistency
+                torch.manual_seed(seed + i)
                 if torch.cuda.is_available():
                     torch.cuda.manual_seed(seed + i)
 
@@ -444,7 +449,8 @@ class Qwen3TTSEngine:
                         temperature=temperature,
                         top_k=top_k,
                         top_p=top_p,
-                        max_new_tokens=2048,
+                        repetition_penalty=1.05,
+                        max_new_tokens=max_tokens,
                     )
 
                 if not wavs or len(wavs[0]) == 0:
