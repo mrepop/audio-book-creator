@@ -64,7 +64,7 @@ def run_generation(job_id: str, is_resume: bool = False):
     from src.audio.concatenator import concatenate_chapters
     from src.audio.splicer import splice_chunks
     from src.tts.chunker import chunk_text, ChunkerConfig
-    from src.utils.hardware import profile_resources, log_profile, get_memory_pressure, memory_snapshot
+    from src.utils.hardware import profile_resources, log_profile, get_memory_pressure, memory_snapshot, check_memory_safe, get_system_available_gb
 
     # ---- Cancel any previous worker for this job ----
     old_event = _job_cancel_events.get(job_id)
@@ -275,6 +275,25 @@ def run_generation(job_id: str, is_resume: bool = False):
                     )
 
                     for seg_i, (seg, chunks, speaker, instruct) in enumerate(batch_chunk_groups):
+                        # ---- System-level memory guard ----
+                        # Check ACTUAL available system RAM (not just RSS/MPS alloc)
+                        # This catches Metal driver allocations invisible to PyTorch
+                        safe, avail_gb = check_memory_safe(min_available_gb=16.0)
+                        if not safe:
+                            logger.warning(
+                                f"LOW MEMORY: only {avail_gb:.1f}GB available system RAM. "
+                                f"Cycling engine before continuing."
+                            )
+                            _cycle_tts_engine()
+                            tts_engine = _get_tts_engine()
+                            safe, avail_gb = check_memory_safe(min_available_gb=8.0)
+                            if not safe:
+                                _fail_job(db, job,
+                                    f"System memory critically low ({avail_gb:.1f}GB available). "
+                                    f"Pausing to prevent OOM. Resume when memory is freed."
+                                )
+                                return
+
                         try:
                             chunk_results = tts_engine.generate_chunks(
                                 chunks=chunks,

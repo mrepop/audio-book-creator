@@ -206,9 +206,38 @@ def get_memory_pressure() -> float:
     """
     Return current memory pressure as a fraction in [0.0, 1.0].
     1.0 means all RAM is consumed.
+
+    Uses psutil.virtual_memory().percent which reflects system-wide
+    memory usage including Metal/MPS driver allocations that are
+    invisible to per-process RSS and torch.mps.* APIs.
     """
     mem = psutil.virtual_memory()
     return mem.percent / 100.0
+
+
+def get_system_available_gb() -> float:
+    """Return available system RAM in GB.
+
+    This is the most reliable metric on macOS because it captures
+    ALL memory consumers including Metal GPU allocations, the
+    MPSGraphCache, and MLIR BumpPtrAllocators that are invisible
+    to torch.mps.current_allocated_memory() and process RSS.
+    """
+    mem = psutil.virtual_memory()
+    return mem.available / (1024 ** 3)
+
+
+def check_memory_safe(min_available_gb: float = 16.0) -> tuple[bool, float]:
+    """Check if there is enough system memory to continue.
+
+    Args:
+        min_available_gb: Minimum available RAM to consider safe.
+
+    Returns:
+        (is_safe, available_gb) tuple.
+    """
+    available = get_system_available_gb()
+    return available >= min_available_gb, available
 
 
 def compute_batch_size(
