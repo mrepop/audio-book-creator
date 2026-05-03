@@ -263,55 +263,34 @@ def run_generation(job_id: str, is_resume: bool = False):
                     if not batch_chunk_groups:
                         continue
 
-                    # Flatten all chunks into one batched TTS call per speaker group
-                    # This reduces the number of generate_custom_voice calls
-                    all_texts = []
-                    all_speakers = []
-                    all_instructs = []
-                    chunk_to_seg_map = []  # (seg_index, chunk_index) for reassembly
-
-                    for seg_i, (seg, chunks, speaker, instruct) in enumerate(batch_chunk_groups):
-                        for chunk_i, chunk in enumerate(chunks):
-                            all_texts.append(chunk.text)
-                            all_speakers.append(speaker)
-                            all_instructs.append(instruct)
-                            chunk_to_seg_map.append((seg_i, chunk_i))
-
-                    total_chunks_in_batch = len(all_texts)
+                    # Generate each segment's chunks sequentially (batch_size=1)
+                    # MPS graph cache leaks per unique tensor shape, so batching
+                    # multiple texts (which pads to max length) creates larger
+                    # cache entries and leaks faster.  Sequential generation with
+                    # cleanup between segment batches is the optimal MPS strategy.
+                    total_chunks = sum(len(chunks) for _, chunks, _, _ in batch_chunk_groups)
                     logger.info(
-                        f"Batched TTS: {total_chunks_in_batch} chunks from "
-                        f"{len(batch_chunk_groups)} segments, "
-                        f"speakers={set(all_speakers)}"
+                        f"Generating {total_chunks} chunks from "
+                        f"{len(batch_chunk_groups)} segments sequentially"
                     )
 
-                    # Generate all chunks in the batch
-                    try:
-                        batch_results = tts_engine.generate_batch(
-                            texts=all_texts,
-                            speakers=all_speakers,
-                            instructions=all_instructs,
-                            temperature=0.7,
-                        )
-                    except Exception as e:
-                        _fail_job(db, job, f"Batched TTS failed on chapter {chapter.number}: {e}")
-                        return
-
-                    # Reassemble: group batch results back into per-segment chunks
-                    seg_chunk_audios: dict[int, list] = {}
-                    for result_i, (audio, sr) in enumerate(batch_results):
-                        seg_i, chunk_i = chunk_to_seg_map[result_i]
-                        if seg_i not in seg_chunk_audios:
-                            seg_chunk_audios[seg_i] = []
-                        seg_chunk_audios[seg_i].append(audio)
-                    del batch_results
-
-                    # Splice each segment's chunks and save to disk
                     for seg_i, (seg, chunks, speaker, instruct) in enumerate(batch_chunk_groups):
-                        chunk_audios = seg_chunk_audios.get(seg_i, [])
-                        if not chunk_audios:
-                            continue
+                        try:
+                            chunk_results = tts_engine.generate_chunks(
+                                chunks=chunks,
+                                speaker=speaker,
+                                instruct=instruct,
+                                temperature=0.7,
+                                seed=42,
+                            )
+                        except Exception as e:
+                            _fail_job(db, job, f"TTS failed on ch{chapter.number} seg{seg.sequence_number}: {e}")
+                            return
 
+                        chunk_audios = [audio for audio, sr in chunk_results]
                         chunk_para_flags = [c.is_paragraph_end for c in chunks]
+                        del chunk_results
+
                         seg_audio = splice_chunks(
                             chunk_audios=chunk_audios,
                             sample_rate=sample_rate,
@@ -321,6 +300,7 @@ def run_generation(job_id: str, is_resume: bool = False):
                             target_lufs=-16.0,
                             paragraph_end_flags=chunk_para_flags,
                         )
+                        del chunk_audios
 
                         seg_path = str(
                             TEMP_DIR / f"job_{job_id}_ch{chapter.number:03d}_seg{seg.sequence_number:04d}.wav"
@@ -336,9 +316,7 @@ def run_generation(job_id: str, is_resume: bool = False):
                         paragraph_end_flags.append(
                             seg.segment_type.value == "narration"
                         )
-                        del seg_audio, chunk_audios
-
-                    del seg_chunk_audios
+                        del seg_audio
 
                     # ---- Post-batch cleanup: cycle MPS to reclaim graph cache ----
                     _cycle_tts_engine()
