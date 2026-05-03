@@ -227,11 +227,10 @@ def run_generation(job_id: str, is_resume: bool = False):
 
                 segment_audio_paths = []       # Paths to segment WAV files on disk
                 paragraph_end_flags = []       # For chapter-level splicing
-                generation_calls_since_reset = 0  # Track calls for MPS reset
-                MPS_RESET_INTERVAL = 25        # Reload model every N segments to reset MPS allocator
+                BATCH_SEGMENTS = 4             # Process N segments per batch before cleanup
 
-                for seg_idx, seg in enumerate(segments):
-                    # ---- Stop check BETWEEN every segment ----
+                for batch_start in range(0, len(segments), BATCH_SEGMENTS):
+                    # ---- Stop check before each batch ----
                     if cancel_event.is_set() or _is_stopped(db, job):
                         logger.info(
                             f"Job {job_id} stopped mid-chapter "
@@ -239,83 +238,112 @@ def run_generation(job_id: str, is_resume: bool = False):
                         )
                         return
 
-                    seg_text = seg.user_text_override or seg.text
-                    speaker = (
-                        speaker_map.get(seg.character_id, narrator_speaker)
-                        if seg.character_id else narrator_speaker
+                    batch_segs = segments[batch_start:batch_start + BATCH_SEGMENTS]
+                    logger.info(
+                        f"--- Batch {batch_start // BATCH_SEGMENTS + 1}: "
+                        f"segments {batch_start+1}-{batch_start+len(batch_segs)}/{len(segments)} ---"
                     )
-                    instruct = tts_engine._build_instruction({
-                        "emotion": seg.emotion, "emphasis": seg.emphasis, "pacing": seg.pacing
-                    })
 
-                    # Chunk this segment's text into 12-15s pieces
-                    chunks = chunk_text(seg_text, config=chunker_cfg)
+                    # Collect all chunks across this batch of segments,
+                    # grouped by speaker for efficient batched TTS calls
+                    batch_chunk_groups = []  # list of (seg, chunks, speaker, instruct)
+                    for seg in batch_segs:
+                        seg_text = seg.user_text_override or seg.text
+                        speaker = (
+                            speaker_map.get(seg.character_id, narrator_speaker)
+                            if seg.character_id else narrator_speaker
+                        )
+                        instruct = tts_engine._build_instruction({
+                            "emotion": seg.emotion, "emphasis": seg.emphasis, "pacing": seg.pacing
+                        })
+                        chunks = chunk_text(seg_text, config=chunker_cfg)
+                        if chunks:
+                            batch_chunk_groups.append((seg, chunks, speaker, instruct))
 
-                    if not chunks:
-                        logger.warning(f"Segment {seg.sequence_number}: no chunks produced, skipping")
+                    if not batch_chunk_groups:
                         continue
 
+                    # Flatten all chunks into one batched TTS call per speaker group
+                    # This reduces the number of generate_custom_voice calls
+                    all_texts = []
+                    all_speakers = []
+                    all_instructs = []
+                    chunk_to_seg_map = []  # (seg_index, chunk_index) for reassembly
+
+                    for seg_i, (seg, chunks, speaker, instruct) in enumerate(batch_chunk_groups):
+                        for chunk_i, chunk in enumerate(chunks):
+                            all_texts.append(chunk.text)
+                            all_speakers.append(speaker)
+                            all_instructs.append(instruct)
+                            chunk_to_seg_map.append((seg_i, chunk_i))
+
+                    total_chunks_in_batch = len(all_texts)
                     logger.info(
-                        f"Segment {seg_idx+1}/{len(segments)}: "
-                        f"{len(chunks)} chunk(s), speaker={speaker}"
+                        f"Batched TTS: {total_chunks_in_batch} chunks from "
+                        f"{len(batch_chunk_groups)} segments, "
+                        f"speakers={set(all_speakers)}"
                     )
 
-                    # Generate each chunk individually
+                    # Generate all chunks in the batch
                     try:
-                        chunk_results = tts_engine.generate_chunks(
-                            chunks=chunks,
-                            speaker=speaker,
-                            instruct=instruct,
+                        batch_results = tts_engine.generate_batch(
+                            texts=all_texts,
+                            speakers=all_speakers,
+                            instructions=all_instructs,
                             temperature=0.7,
-                            seed=42,
                         )
                     except Exception as e:
-                        _fail_job(db, job, f"TTS chunk generation failed on chapter {chapter.number}, segment {seg.sequence_number}: {e}")
+                        _fail_job(db, job, f"Batched TTS failed on chapter {chapter.number}: {e}")
                         return
 
-                    # Splice chunks into one segment audio
-                    chunk_audios = [audio for audio, sr in chunk_results]
-                    chunk_para_flags = [c.is_paragraph_end for c in chunks]
-                    del chunk_results
+                    # Reassemble: group batch results back into per-segment chunks
+                    seg_chunk_audios: dict[int, list] = {}
+                    for result_i, (audio, sr) in enumerate(batch_results):
+                        seg_i, chunk_i = chunk_to_seg_map[result_i]
+                        if seg_i not in seg_chunk_audios:
+                            seg_chunk_audios[seg_i] = []
+                        seg_chunk_audios[seg_i].append(audio)
+                    del batch_results
 
-                    seg_audio = splice_chunks(
-                        chunk_audios=chunk_audios,
-                        sample_rate=sample_rate,
-                        crossfade_ms=cc.crossfade_ms,
-                        sentence_silence_ms=cc.sentence_silence_ms,
-                        paragraph_silence_ms=cc.paragraph_silence_ms,
-                        target_lufs=-16.0,
-                        paragraph_end_flags=chunk_para_flags,
-                    )
-                    del chunk_audios
+                    # Splice each segment's chunks and save to disk
+                    for seg_i, (seg, chunks, speaker, instruct) in enumerate(batch_chunk_groups):
+                        chunk_audios = seg_chunk_audios.get(seg_i, [])
+                        if not chunk_audios:
+                            continue
 
-                    # Save segment audio to disk (do NOT hold in memory)
-                    seg_path = str(
-                        TEMP_DIR / f"job_{job_id}_ch{chapter.number:03d}_seg{seg.sequence_number:04d}.wav"
-                    )
-                    sf.write(seg_path, seg_audio, sample_rate)
+                        chunk_para_flags = [c.is_paragraph_end for c in chunks]
+                        seg_audio = splice_chunks(
+                            chunk_audios=chunk_audios,
+                            sample_rate=sample_rate,
+                            crossfade_ms=cc.crossfade_ms,
+                            sentence_silence_ms=cc.sentence_silence_ms,
+                            paragraph_silence_ms=cc.paragraph_silence_ms,
+                            target_lufs=-16.0,
+                            paragraph_end_flags=chunk_para_flags,
+                        )
 
-                    seg.audio_path = seg_path
-                    seg.audio_duration_seconds = len(seg_audio) / sample_rate
-                    seg.is_generated = True
-                    completed_segments += 1
+                        seg_path = str(
+                            TEMP_DIR / f"job_{job_id}_ch{chapter.number:03d}_seg{seg.sequence_number:04d}.wav"
+                        )
+                        sf.write(seg_path, seg_audio, sample_rate)
 
-                    segment_audio_paths.append(seg_path)
-                    paragraph_end_flags.append(
-                        seg.segment_type.value == "narration"
-                    )
-                    del seg_audio, chunk_para_flags
+                        seg.audio_path = seg_path
+                        seg.audio_duration_seconds = len(seg_audio) / sample_rate
+                        seg.is_generated = True
+                        completed_segments += 1
 
-                    # ---- Periodic MPS allocator reset ----
-                    # macOS MPS never returns mapped pages to the OS.
-                    # Each generate_custom_voice call leaks ~35MB of RSS.
-                    # Cycling the model every N segments reclaims that memory.
-                    generation_calls_since_reset += len(chunks)
-                    if generation_calls_since_reset >= MPS_RESET_INTERVAL:
-                        _cycle_tts_engine()
-                        tts_engine = _get_tts_engine()
-                        generation_calls_since_reset = 0
-                        memory_snapshot("worker:post-mps-reset")
+                        segment_audio_paths.append(seg_path)
+                        paragraph_end_flags.append(
+                            seg.segment_type.value == "narration"
+                        )
+                        del seg_audio, chunk_audios
+
+                    del seg_chunk_audios
+
+                    # ---- Post-batch cleanup: cycle MPS to reclaim graph cache ----
+                    _cycle_tts_engine()
+                    tts_engine = _get_tts_engine()
+                    memory_snapshot(f"worker:post-batch-reset ch{chapter.number}")
 
                     # Update progress
                     job.completed_segments = completed_segments
@@ -330,12 +358,8 @@ def run_generation(job_id: str, is_resume: bool = False):
                     )
                     db.commit()
 
-                    memory_snapshot(
-                        f"worker:seg-done seg={completed_segments}/{total_segments} "
-                        f"ch={chapter.number}/{len(chapters)}"
-                    )
                     logger.info(
-                        f"Segment {completed_segments}/{total_segments} "
+                        f"Batch done: {completed_segments}/{total_segments} "
                         f"({job.progress:.1f}%) | "
                         f"rate={rate:.2f} seg/s | ETA={int(remaining)}s"
                     )
