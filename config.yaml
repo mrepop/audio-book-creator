@@ -92,7 +92,7 @@ generation:
     auto_assign_voices: true
     auto_analyze_context: true
   # Job settings
-  max_concurrent_jobs: 3  # Tripled: GPU and memory have headroom
+  max_concurrent_jobs: 40
   checkpoint_interval: 10  # Save progress every N segments
 
 # Storage settings
