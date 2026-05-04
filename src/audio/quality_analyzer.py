@@ -70,6 +70,15 @@ def analyze_segment(
     expected_duration_s: float = 0.0,
     use_whisper: bool = True,
     whisper_model_size: str = "base",
+    # Configurable thresholds (loaded from config.yaml > quality)
+    text_similarity_fail: float = 0.6,
+    text_similarity_warn: float = 0.75,
+    duration_ratio_fail: float = 2.5,
+    duration_ratio_warn: float = 1.8,
+    max_silence_s_fail: float = 3.0,
+    max_silence_s_warn: float = 1.5,
+    clipping_ratio_fail: float = 0.01,
+    repetition_score_fail: float = 0.7,
 ) -> QualityReport:
     """Analyze a generated audio segment for quality issues.
 
@@ -95,12 +104,12 @@ def analyze_segment(
     # 1. Duration check
     if expected_duration_s > 0:
         report.duration_ratio = duration_s / expected_duration_s
-        if report.duration_ratio > 2.5:
+        if report.duration_ratio > duration_ratio_fail:
             report.issues.append(
                 f"RUNAWAY: audio is {duration_s:.1f}s but expected ~{expected_duration_s:.1f}s "
                 f"({report.duration_ratio:.1f}x longer)"
             )
-        elif report.duration_ratio > 1.8:
+        elif report.duration_ratio > duration_ratio_warn:
             report.warnings.append(
                 f"LONG: audio is {duration_s:.1f}s, expected ~{expected_duration_s:.1f}s "
                 f"({report.duration_ratio:.1f}x)"
@@ -111,17 +120,17 @@ def analyze_segment(
             )
 
     # 2. Silence detection
-    _check_silence(audio, sr, report)
+    _check_silence(audio, sr, report, max_silence_s_fail, max_silence_s_warn)
 
     # 3. Clipping detection
-    _check_clipping(audio, report)
+    _check_clipping(audio, report, clipping_ratio_fail)
 
     # 4. Repetition detection
-    _check_repetition(audio, sr, report)
+    _check_repetition(audio, sr, report, repetition_score_fail)
 
     # 5. Whisper transcription comparison
     if use_whisper and expected_text:
-        _check_transcription(audio_path, expected_text, whisper_model_size, report)
+        _check_transcription(audio_path, expected_text, whisper_model_size, report, text_similarity_fail, text_similarity_warn)
 
     # Log results
     status = "[PASS]" if report.passed else f"[FAIL: {len(report.issues)} issues]"
@@ -139,7 +148,7 @@ def analyze_segment(
     return report
 
 
-def _check_silence(audio: np.ndarray, sr: int, report: QualityReport):
+def _check_silence(audio: np.ndarray, sr: int, report: QualityReport, max_silence_s_fail: float = 3.0, max_silence_s_warn: float = 1.5):
     """Detect long silence gaps."""
     # RMS energy in 50ms windows
     window = int(sr * 0.05)
@@ -176,11 +185,11 @@ def _check_silence(audio: np.ndarray, sr: int, report: QualityReport):
 
     report.max_silence_s = max_gap * 0.05  # window size in seconds
 
-    if report.max_silence_s > 3.0:
+    if report.max_silence_s > max_silence_s_fail:
         report.issues.append(
             f"SILENCE_GAP: {report.max_silence_s:.1f}s silence detected"
         )
-    elif report.max_silence_s > 1.5:
+    elif report.max_silence_s > max_silence_s_warn:
         report.warnings.append(
             f"SILENCE_GAP: {report.max_silence_s:.1f}s silence"
         )
@@ -191,13 +200,13 @@ def _check_silence(audio: np.ndarray, sr: int, report: QualityReport):
         )
 
 
-def _check_clipping(audio: np.ndarray, report: QualityReport):
+def _check_clipping(audio: np.ndarray, report: QualityReport, clipping_ratio_fail: float = 0.01):
     """Detect audio clipping."""
     clip_threshold = 0.999
     clipped = np.abs(audio) > clip_threshold
     report.clipping_ratio = np.mean(clipped)
 
-    if report.clipping_ratio > 0.01:
+    if report.clipping_ratio > clipping_ratio_fail:
         report.issues.append(
             f"CLIPPING: {report.clipping_ratio:.1%} of samples clipped"
         )
@@ -207,7 +216,7 @@ def _check_clipping(audio: np.ndarray, report: QualityReport):
         )
 
 
-def _check_repetition(audio: np.ndarray, sr: int, report: QualityReport):
+def _check_repetition(audio: np.ndarray, sr: int, report: QualityReport, repetition_score_fail: float = 0.7):
     """Detect repetitive patterns via normalized autocorrelation.
 
     Stuttering and repetition loops produce strong peaks in the
@@ -245,7 +254,7 @@ def _check_repetition(audio: np.ndarray, sr: int, report: QualityReport):
     else:
         report.repetition_score = 0.0
 
-    if report.repetition_score > 0.7:
+    if report.repetition_score > repetition_score_fail:
         report.issues.append(
             f"REPETITION: strong repeating pattern detected "
             f"(score={report.repetition_score:.2f})"
@@ -262,6 +271,8 @@ def _check_transcription(
     expected_text: str,
     model_size: str,
     report: QualityReport,
+    text_similarity_fail: float = 0.6,
+    text_similarity_warn: float = 0.75,
 ):
     """Transcribe with Whisper and compare to expected text."""
     global _whisper_model
@@ -292,14 +303,14 @@ def _check_transcription(
         matcher = SequenceMatcher(None, expected_words, actual_words)
         report.text_similarity = matcher.ratio()
 
-        if report.text_similarity < 0.6:
+        if report.text_similarity < text_similarity_fail:
             report.issues.append(
                 f"GIBBERISH: transcription doesn't match input "
                 f"(similarity={report.text_similarity:.0%}). "
                 f"Expected: '{expected_text[:80]}...' "
                 f"Got: '{transcription[:80]}...'"
             )
-        elif report.text_similarity < 0.75:
+        elif report.text_similarity < text_similarity_warn:
             report.warnings.append(
                 f"MISMATCH: partial text match "
                 f"(similarity={report.text_similarity:.0%}). "

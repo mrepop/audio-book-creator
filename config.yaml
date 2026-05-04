@@ -73,6 +73,22 @@ chunking:
   crossfade_ms: 100            # Hann-window crossfade at chunk boundaries
   words_per_second_estimate: 2.5  # Used to estimate sentence duration before TTS
 
+# Quality checks -- controls post-generation audio verification
+quality:
+  enabled: true                     # Run quality checks after each segment
+  use_whisper: true                 # Use Whisper transcription for text comparison
+  whisper_model: "base"             # Whisper model size (tiny, base, small, medium)
+  min_words_for_whisper: 5          # Skip Whisper for segments shorter than this
+  max_retries: 2                    # Auto-retry failed segments with different seed
+  text_similarity_fail: 0.6         # Below this = GIBBERISH (hard fail)
+  text_similarity_warn: 0.75        # Below this = MISMATCH (warning)
+  duration_ratio_fail: 2.5          # Above this = RUNAWAY (hard fail)
+  duration_ratio_warn: 1.8          # Above this = LONG (warning)
+  max_silence_s_fail: 3.0           # Silence gap longer than this = fail
+  max_silence_s_warn: 1.5           # Silence gap longer than this = warning
+  clipping_ratio_fail: 0.01         # Clipping above this fraction = fail
+  repetition_score_fail: 0.7        # Autocorrelation above this = fail
+
 # Resource management -- controls memory-aware batch sizing
 resources:
   batch_size: 1            # TESTING: forced to 1 for memory debugging (was: auto)

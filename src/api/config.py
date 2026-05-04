@@ -77,6 +77,23 @@ class ChunkingConfig:
 
 
 @dataclass
+class QualityConfig:
+    enabled: bool = True
+    use_whisper: bool = True
+    whisper_model: str = "base"
+    min_words_for_whisper: int = 5
+    max_retries: int = 2
+    text_similarity_fail: float = 0.6
+    text_similarity_warn: float = 0.75
+    duration_ratio_fail: float = 2.5
+    duration_ratio_warn: float = 1.8
+    max_silence_s_fail: float = 3.0
+    max_silence_s_warn: float = 1.5
+    clipping_ratio_fail: float = 0.01
+    repetition_score_fail: float = 0.7
+
+
+@dataclass
 class ResourceConfig:
     batch_size: str = "auto"  # "auto" or integer string
     memory_headroom_percent: float = 20.0
@@ -103,6 +120,7 @@ class AppConfig:
     tts: TTSConfig = field(default_factory=TTSConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
+    quality: QualityConfig = field(default_factory=QualityConfig)
     resources: ResourceConfig = field(default_factory=ResourceConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     config_path: Optional[str] = None
@@ -190,6 +208,24 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             paragraph_silence_ms=int(chunk_raw.get("paragraph_silence_ms", config.chunking.paragraph_silence_ms)),
             crossfade_ms=int(chunk_raw.get("crossfade_ms", config.chunking.crossfade_ms)),
             words_per_second_estimate=float(chunk_raw.get("words_per_second_estimate", config.chunking.words_per_second_estimate)),
+        )
+
+        # Quality
+        qa_raw = raw.get("quality", {})
+        config.quality = QualityConfig(
+            enabled=bool(qa_raw.get("enabled", config.quality.enabled)),
+            use_whisper=bool(qa_raw.get("use_whisper", config.quality.use_whisper)),
+            whisper_model=str(qa_raw.get("whisper_model", config.quality.whisper_model)),
+            min_words_for_whisper=int(qa_raw.get("min_words_for_whisper", config.quality.min_words_for_whisper)),
+            max_retries=int(qa_raw.get("max_retries", config.quality.max_retries)),
+            text_similarity_fail=float(qa_raw.get("text_similarity_fail", config.quality.text_similarity_fail)),
+            text_similarity_warn=float(qa_raw.get("text_similarity_warn", config.quality.text_similarity_warn)),
+            duration_ratio_fail=float(qa_raw.get("duration_ratio_fail", config.quality.duration_ratio_fail)),
+            duration_ratio_warn=float(qa_raw.get("duration_ratio_warn", config.quality.duration_ratio_warn)),
+            max_silence_s_fail=float(qa_raw.get("max_silence_s_fail", config.quality.max_silence_s_fail)),
+            max_silence_s_warn=float(qa_raw.get("max_silence_s_warn", config.quality.max_silence_s_warn)),
+            clipping_ratio_fail=float(qa_raw.get("clipping_ratio_fail", config.quality.clipping_ratio_fail)),
+            repetition_score_fail=float(qa_raw.get("repetition_score_fail", config.quality.repetition_score_fail)),
         )
 
         # Resources

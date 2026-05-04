@@ -328,22 +328,30 @@ def run_generation(job_id: str, is_resume: bool = False):
                         sf.write(seg_path, seg_audio, sample_rate)
 
                         # ---- Quality check with auto-retry ----
+                        qc = config.quality
                         seg_text = seg.user_text_override or seg.text
                         est_dur = len(seg_text.split()) / 2.5
-                        # Use Whisper for segments with enough text to compare
-                        # (very short fragments < 5 words skip Whisper)
-                        use_whisper = len(seg_text.split()) >= 5
+                        do_whisper = qc.use_whisper and len(seg_text.split()) >= qc.min_words_for_whisper
+
                         qa = check_audio_quality(
                             seg_path,
                             expected_text=seg_text,
                             expected_duration_s=est_dur,
-                            use_whisper=use_whisper,
-                            whisper_model_size="base",
-                        )
+                            use_whisper=do_whisper and qc.enabled,
+                            whisper_model_size=qc.whisper_model,
+                            text_similarity_fail=qc.text_similarity_fail,
+                            text_similarity_warn=qc.text_similarity_warn,
+                            duration_ratio_fail=qc.duration_ratio_fail,
+                            duration_ratio_warn=qc.duration_ratio_warn,
+                            max_silence_s_fail=qc.max_silence_s_fail,
+                            max_silence_s_warn=qc.max_silence_s_warn,
+                            clipping_ratio_fail=qc.clipping_ratio_fail,
+                            repetition_score_fail=qc.repetition_score_fail,
+                        ) if qc.enabled else None
 
-                        MAX_RETRIES = 2
+                        MAX_RETRIES = qc.max_retries if qc.enabled else 0
                         retry = 0
-                        while not qa.passed and retry < MAX_RETRIES:
+                        while qa and not qa.passed and retry < MAX_RETRIES:
                             retry += 1
                             logger.warning(
                                 f"Quality check FAILED for ch{chapter.number} seg{seg.sequence_number} "
@@ -381,11 +389,19 @@ def run_generation(job_id: str, is_resume: bool = False):
                                 seg_path,
                                 expected_text=seg_text,
                                 expected_duration_s=est_dur,
-                                use_whisper=use_whisper,
-                                whisper_model_size="base",
+                                use_whisper=do_whisper,
+                                whisper_model_size=qc.whisper_model,
+                                text_similarity_fail=qc.text_similarity_fail,
+                                text_similarity_warn=qc.text_similarity_warn,
+                                duration_ratio_fail=qc.duration_ratio_fail,
+                                duration_ratio_warn=qc.duration_ratio_warn,
+                                max_silence_s_fail=qc.max_silence_s_fail,
+                                max_silence_s_warn=qc.max_silence_s_warn,
+                                clipping_ratio_fail=qc.clipping_ratio_fail,
+                                repetition_score_fail=qc.repetition_score_fail,
                             )
 
-                        if not qa.passed:
+                        if qa and not qa.passed:
                             logger.warning(
                                 f"Quality check still FAILED after {MAX_RETRIES} retries "
                                 f"for ch{chapter.number} seg{seg.sequence_number} "
@@ -393,7 +409,7 @@ def run_generation(job_id: str, is_resume: bool = False):
                             )
 
                         seg.audio_path = seg_path
-                        seg.audio_duration_seconds = qa.duration_s
+                        seg.audio_duration_seconds = qa.duration_s if qa else (len(sf.read(seg_path)[0]) / sample_rate)
                         seg.is_generated = True
                         completed_segments += 1
 
