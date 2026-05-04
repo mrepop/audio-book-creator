@@ -234,7 +234,7 @@ async def preview_segment_audio(
     splices them together, and returns the WAV audio directly.
     """
     from fastapi.responses import Response
-    from src.workers.generation_worker import _get_tts_engine
+    from src.tts.engine_pool import get_engine_pool
     from src.tts.chunker import chunk_text, ChunkerConfig
     from src.audio.splicer import splice_chunks
     from src.api.config import get_config
@@ -245,9 +245,10 @@ async def preview_segment_audio(
     if not segment:
         raise HTTPException(404, "Segment not found")
 
-    engine = _get_tts_engine()
-    if engine is None:
-        raise HTTPException(503, "TTS engine not available")
+    try:
+        pool = get_engine_pool()
+    except Exception:
+        raise HTTPException(503, "TTS engine pool not available")
 
     config = get_config()
     cc = config.chunking
@@ -264,30 +265,30 @@ async def preview_segment_audio(
         raise HTTPException(400, "Segment text produced no chunks")
 
     # Build instruct from segment context
-    instruct = engine._build_instruction({
+    from src.tts.qwen3_engine import Qwen3TTSEngine
+    instruct = Qwen3TTSEngine._build_instruction(None, {
         "emotion": segment.emotion,
         "emphasis": segment.emphasis,
         "pacing": segment.pacing,
     })
 
-    # Use narrator speaker as default; caller can override via segment params
     speaker = "Ryan"
 
     import asyncio
     from functools import partial
 
+    def _generate_with_pool():
+        with pool.engine() as engine:
+            return engine.generate_chunks(
+                chunks=chunks,
+                speaker=speaker,
+                instruct=instruct,
+                temperature=0.7,
+                seed=42,
+            )
+
     loop = asyncio.get_event_loop()
-    chunk_results = await loop.run_in_executor(
-        None,
-        partial(
-            engine.generate_chunks,
-            chunks=chunks,
-            speaker=speaker,
-            instruct=instruct,
-            temperature=0.7,
-            seed=42,
-        ),
-    )
+    chunk_results = await loop.run_in_executor(None, _generate_with_pool)
 
     chunk_audios = [audio for audio, sr in chunk_results]
     chunk_para_flags = [c.is_paragraph_end for c in chunks]
@@ -332,7 +333,7 @@ async def _run_generation(job_id: str, is_resume: bool = False):
 async def _regenerate_segment(segment_id: int):
     """Background task: regenerate a single segment's audio."""
     from src.api.database import get_db_context
-    from src.workers.generation_worker import _get_tts_engine
+    from src.tts.engine_pool import get_engine_pool
 
     try:
         with get_db_context() as db:
@@ -340,9 +341,10 @@ async def _regenerate_segment(segment_id: int):
             if not segment:
                 return
 
-            engine = _get_tts_engine()
-            if engine is None:
-                logger.error(f"Cannot regenerate segment {segment_id}: TTS engine not available")
+            try:
+                pool = get_engine_pool()
+            except Exception:
+                logger.error(f"Cannot regenerate segment {segment_id}: TTS engine pool not available")
                 return
 
             text = segment.user_text_override or segment.text
@@ -352,7 +354,8 @@ async def _regenerate_segment(segment_id: int):
                 "pacing": segment.pacing,
             }
 
-            audio, sr = engine.generate_segment(
+            with pool.engine() as engine:
+                audio, sr = engine.generate_segment(
                 text=text,
                 speaker="Ryan",
                 language="English",

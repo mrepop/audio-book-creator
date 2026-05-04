@@ -156,13 +156,16 @@ def run_generation(job_id: str, is_resume: bool = False):
 
             logger.info(f"Processing {len(chapters)} chapters, {total_segments} segments")
 
-            # Load TTS engine -- singleton, shared across resume calls
-            tts_engine = _get_tts_engine()
-            if tts_engine is None:
-                _fail_job(db, job, "TTS engine failed to load. Check logs for details (model download, MPS issues, etc.)")
+            # Load TTS engine pool -- multiple model instances for parallel generation
+            from src.tts.engine_pool import get_engine_pool
+            try:
+                engine_pool = get_engine_pool()
+            except Exception as e:
+                _fail_job(db, job, f"TTS engine pool failed to load: {e}")
                 return
 
-            memory_snapshot("worker:post-model-load")
+            memory_snapshot("worker:post-pool-load")
+            logger.info(f"Engine pool: {engine_pool.pool_size} instances, {engine_pool.available} available")
 
             # Build speaker assignments per character
             speaker_map = _build_speaker_map(db, book.id)
@@ -248,13 +251,15 @@ def run_generation(job_id: str, is_resume: bool = False):
                     # Collect all chunks across this batch of segments,
                     # grouped by speaker for efficient batched TTS calls
                     batch_chunk_groups = []  # list of (seg, chunks, speaker, instruct)
+                    from src.tts.qwen3_engine import Qwen3TTSEngine
                     for seg in batch_segs:
                         seg_text = seg.user_text_override or seg.text
                         speaker = (
                             speaker_map.get(seg.character_id, narrator_speaker)
                             if seg.character_id else narrator_speaker
                         )
-                        instruct = tts_engine._build_instruction({
+                        # _build_instruction is a static-like method, safe to call on any instance
+                        instruct = Qwen3TTSEngine._build_instruction(None, {
                             "emotion": seg.emotion, "emphasis": seg.emphasis, "pacing": seg.pacing
                         })
                         chunks = chunk_text(seg_text, config=chunker_cfg)
@@ -277,16 +282,11 @@ def run_generation(job_id: str, is_resume: bool = False):
 
                     for seg_i, (seg, chunks, speaker, instruct) in enumerate(batch_chunk_groups):
                         # ---- System-level memory guard ----
-                        # Check ACTUAL available system RAM (not just RSS/MPS alloc)
-                        # This catches Metal driver allocations invisible to PyTorch
                         safe, avail_gb = check_memory_safe(min_available_gb=16.0)
                         if not safe:
-                            logger.warning(
-                                f"LOW MEMORY: only {avail_gb:.1f}GB available system RAM. "
-                                f"Cycling engine before continuing."
-                            )
-                            _cycle_tts_engine()
-                            tts_engine = _get_tts_engine()
+                            logger.warning(f"LOW MEMORY: {avail_gb:.1f}GB available. Flushing caches.")
+                            import torch
+                            torch.mps.empty_cache()
                             safe, avail_gb = check_memory_safe(min_available_gb=8.0)
                             if not safe:
                                 _fail_job(db, job,
@@ -295,14 +295,16 @@ def run_generation(job_id: str, is_resume: bool = False):
                                 )
                                 return
 
+                        # Acquire an engine from the pool (blocks if all busy)
                         try:
-                            chunk_results = tts_engine.generate_chunks(
-                                chunks=chunks,
-                                speaker=speaker,
-                                instruct=instruct,
-                                temperature=0.7,
-                                seed=42,
-                            )
+                            with engine_pool.engine() as tts_engine:
+                                chunk_results = tts_engine.generate_chunks(
+                                    chunks=chunks,
+                                    speaker=speaker,
+                                    instruct=instruct,
+                                    temperature=0.7,
+                                    seed=42,
+                                )
                         except Exception as e:
                             _fail_job(db, job, f"TTS failed on ch{chapter.number} seg{seg.sequence_number}: {e}")
                             return
@@ -360,13 +362,14 @@ def run_generation(job_id: str, is_resume: bool = False):
                             )
                             # Regenerate with a different seed
                             try:
-                                chunk_results = tts_engine.generate_chunks(
-                                    chunks=chunks,
-                                    speaker=speaker,
-                                    instruct=instruct,
-                                    temperature=0.7,
-                                    seed=42 + retry * 100,
-                                )
+                                with engine_pool.engine() as tts_engine:
+                                    chunk_results = tts_engine.generate_chunks(
+                                        chunks=chunks,
+                                        speaker=speaker,
+                                        instruct=instruct,
+                                        temperature=0.7,
+                                        seed=42 + retry * 100,
+                                    )
                             except Exception:
                                 break
 
