@@ -307,14 +307,12 @@ def profile_resources(
         calc_total = gpu_info["gpu_vram_gb"]
         notes.append(f"Using CUDA VRAM ({gpu_info['gpu_vram_gb']:.1f}GB) for batch sizing")
     elif gpu_info["gpu_type"] == "mps":
-        # MPS unified memory does NOT benefit from batching like CUDA does.
-        # Batched inference multiplies the KV cache linearly with batch size
-        # and MPS has no parallel kernel advantage, so batch>1 just wastes
-        # memory with no speed gain.  Force sequential generation.
+        # MPS unified memory -- use system RAM for batch calculation.
+        # With the patched PyTorch (PR #181485), empty_cache() clears
+        # the MPSGraphCache so memory is properly reclaimed.
         calc_available = available_gb
         calc_total = total_gb
-        max_batch_size = 1
-        notes.append(f"MPS detected -- forcing batch_size=1 (batching wastes memory on unified memory)")
+        notes.append(f"MPS detected -- using system RAM ({total_gb:.1f}GB total, {available_gb:.1f}GB free)")
     else:
         # CPU fallback
         calc_available = available_gb

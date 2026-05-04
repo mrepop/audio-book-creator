@@ -91,10 +91,10 @@ quality:
 
 # Resource management -- controls memory-aware batch sizing
 resources:
-  batch_size: 1            # TESTING: forced to 1 for memory debugging (was: auto)
+  batch_size: auto               # "auto" to detect from hardware, or integer override
   memory_headroom_percent: 20   # % of total RAM to keep free
   per_segment_cost_gb: 1.5      # Estimated memory per segment in a batch
-  max_batch_size: 1              # TESTING: forced to 1 for memory debugging (was: 8)
+  max_batch_size: 24             # Upper bound for auto batch sizing
   min_batch_size: 1              # Lower bound
   flush_interval: 50             # Flush segment audio to disk every N segments
   memory_pressure_threshold: 0.85  # Halve batch if memory usage exceeds this (0-1)
