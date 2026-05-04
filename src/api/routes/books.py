@@ -177,20 +177,27 @@ async def _parse_book(book_id: int):
 
             chapters_data = ebook_parse(book.file_path, book.format.value)
 
+            from src.ebook.boilerplate import is_boilerplate_chapter
+            boilerplate_count = 0
             for i, ch in enumerate(chapters_data):
+                is_bp = is_boilerplate_chapter(ch.get("title", ""), ch["text"])
                 chapter = Chapter(
                     book_id=book.id,
                     number=i + 1,
                     title=ch.get("title"),
                     raw_text=ch["text"],
                     word_count=len(ch["text"].split()),
+                    is_boilerplate=is_bp,
+                    skip_generation=is_bp,  # Auto-skip boilerplate
                 )
+                if is_bp:
+                    boilerplate_count += 1
                 db.add(chapter)
 
             book.total_chapters = len(chapters_data)
             book.total_words = sum(len(ch["text"].split()) for ch in chapters_data)
             book.is_parsed = True
-            logger.info(f"Book {book_id} parsed: {len(chapters_data)} chapters")
+            logger.info(f"Book {book_id} parsed: {len(chapters_data)} chapters ({boilerplate_count} boilerplate auto-skipped)")
     except Exception as e:
         logger.error(f"Failed to parse book {book_id}: {e}")
 

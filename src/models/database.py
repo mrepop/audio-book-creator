@@ -117,6 +117,8 @@ class Chapter(Base):
     audio_path = Column(String(1000), nullable=True)
     audio_duration_seconds = Column(Float, nullable=True)
     is_generated = Column(Boolean, default=False)
+    skip_generation = Column(Boolean, default=False)  # Skip this chapter (boilerplate, TOC, etc.)
+    is_boilerplate = Column(Boolean, default=False)    # Auto-detected as non-content
 
     created_at = Column(TZDateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -219,6 +221,7 @@ class Segment(Base):
     audio_path = Column(String(1000), nullable=True)
     audio_duration_seconds = Column(Float, nullable=True)
     is_generated = Column(Boolean, default=False)
+    skip_generation = Column(Boolean, default=False)  # User can toggle to skip this segment
 
     # User overrides
     user_voice_override_id = Column(Integer, ForeignKey("voice_profiles.id"), nullable=True)

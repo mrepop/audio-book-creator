@@ -180,6 +180,14 @@ def run_generation(job_id: str, is_resume: bool = False):
                     logger.info(f"Job {job_id} stopped (cancel_event={cancel_event.is_set()}, status={job.status.value})")
                     return
 
+                # ---- Skip boilerplate/user-skipped chapters ----
+                if chapter.skip_generation:
+                    logger.info(
+                        f"[SKIP] Chapter {chapter.number}/{len(chapters)}: "
+                        f"{'boilerplate' if chapter.is_boilerplate else 'user-skipped'}"
+                    )
+                    continue
+
                 # ---- Resume: skip fully completed chapters ----
                 if is_resume and chapter.is_generated and chapter.audio_path and Path(chapter.audio_path).exists():
                     chapter_audio_paths.append(chapter.audio_path)
