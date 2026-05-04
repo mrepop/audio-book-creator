@@ -352,10 +352,14 @@ def run_generation(job_id: str, is_resume: bool = False):
                         ) if qc.enabled else None
 
                         MAX_RETRIES = qc.max_retries if qc.enabled else 0
+                        retry_level = getattr(logging, qc.retry_log_level.upper(), logging.WARNING)
+                        failure_level = getattr(logging, qc.failure_log_level.upper(), logging.ERROR)
+
                         retry = 0
                         while qa and not qa.passed and retry < MAX_RETRIES:
                             retry += 1
-                            logger.warning(
+                            logger.log(
+                                retry_level,
                                 f"Quality check FAILED for ch{chapter.number} seg{seg.sequence_number} "
                                 f"(score={qa.score:.0f}, issues={qa.issues}). "
                                 f"Retry {retry}/{MAX_RETRIES}..."
@@ -405,7 +409,8 @@ def run_generation(job_id: str, is_resume: bool = False):
                             )
 
                         if qa and not qa.passed:
-                            logger.warning(
+                            logger.log(
+                                failure_level,
                                 f"Quality check still FAILED after {MAX_RETRIES} retries "
                                 f"for ch{chapter.number} seg{seg.sequence_number} "
                                 f"(score={qa.score:.0f}). Keeping best attempt."

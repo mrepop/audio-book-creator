@@ -79,7 +79,10 @@ quality:
   use_whisper: true                 # Use Whisper transcription for text comparison
   whisper_model: "base"             # Whisper model size (tiny, base, small, medium)
   min_words_for_whisper: 5          # Skip Whisper for segments shorter than this
+  whisper_parallel: true            # Run Whisper in parallel with next TTS generation
   max_retries: 2                    # Auto-retry failed segments with different seed
+  retry_log_level: "WARNING"        # Log level for retry events (DEBUG, INFO, WARNING, ERROR)
+  failure_log_level: "ERROR"        # Log level when all retries exhausted (WARNING, ERROR, CRITICAL)
   text_similarity_fail: 0.6         # Below this = GIBBERISH (hard fail)
   text_similarity_warn: 0.75        # Below this = MISMATCH (warning)
   duration_ratio_fail: 2.5          # Above this = RUNAWAY (hard fail)
@@ -98,6 +101,7 @@ resources:
   min_batch_size: 1              # Lower bound
   flush_interval: 50             # Flush segment audio to disk every N segments
   memory_pressure_threshold: 0.85  # Halve batch if memory usage exceeds this (0-1)
+  engine_pool_size: auto         # Number of TTS model instances ("auto" or integer)
 
 # Generation settings
 generation:

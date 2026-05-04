@@ -82,7 +82,10 @@ class QualityConfig:
     use_whisper: bool = True
     whisper_model: str = "base"
     min_words_for_whisper: int = 5
+    whisper_parallel: bool = True
     max_retries: int = 2
+    retry_log_level: str = "WARNING"
+    failure_log_level: str = "ERROR"
     text_similarity_fail: float = 0.6
     text_similarity_warn: float = 0.75
     duration_ratio_fail: float = 2.5
@@ -102,6 +105,16 @@ class ResourceConfig:
     min_batch_size: int = 1
     flush_interval: int = 50
     memory_pressure_threshold: float = 0.85
+    engine_pool_size: str = "auto"  # "auto" or integer string
+
+    @property
+    def pool_size_override(self) -> Optional[int]:
+        if self.engine_pool_size == "auto":
+            return None
+        try:
+            return int(self.engine_pool_size)
+        except (ValueError, TypeError):
+            return None
 
     @property
     def batch_size_override(self) -> Optional[int]:
@@ -217,7 +230,10 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             use_whisper=bool(qa_raw.get("use_whisper", config.quality.use_whisper)),
             whisper_model=str(qa_raw.get("whisper_model", config.quality.whisper_model)),
             min_words_for_whisper=int(qa_raw.get("min_words_for_whisper", config.quality.min_words_for_whisper)),
+            whisper_parallel=bool(qa_raw.get("whisper_parallel", config.quality.whisper_parallel)),
             max_retries=int(qa_raw.get("max_retries", config.quality.max_retries)),
+            retry_log_level=str(qa_raw.get("retry_log_level", config.quality.retry_log_level)),
+            failure_log_level=str(qa_raw.get("failure_log_level", config.quality.failure_log_level)),
             text_similarity_fail=float(qa_raw.get("text_similarity_fail", config.quality.text_similarity_fail)),
             text_similarity_warn=float(qa_raw.get("text_similarity_warn", config.quality.text_similarity_warn)),
             duration_ratio_fail=float(qa_raw.get("duration_ratio_fail", config.quality.duration_ratio_fail)),
@@ -238,6 +254,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             min_batch_size=int(res_raw.get("min_batch_size", config.resources.min_batch_size)),
             flush_interval=int(res_raw.get("flush_interval", config.resources.flush_interval)),
             memory_pressure_threshold=float(res_raw.get("memory_pressure_threshold", config.resources.memory_pressure_threshold)),
+            engine_pool_size=str(res_raw.get("engine_pool_size", config.resources.engine_pool_size)),
         )
 
         # Logging

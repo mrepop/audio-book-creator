@@ -123,14 +123,24 @@ def get_engine_pool(pool_size: Optional[int] = None) -> EnginePool:
     """Get or create the global engine pool.
 
     Args:
-        pool_size: Number of model instances. If None, auto-detected
-                   based on available memory (8GB per model, 20GB headroom).
+        pool_size: Number of model instances. If None, reads from
+                   config.yaml > resources.engine_pool_size, falling
+                   back to auto-detection based on available memory.
     """
     global _pool
     with _pool_lock:
         if _pool is not None and _pool.loaded:
             return _pool
 
+        # Try config first
+        if pool_size is None:
+            try:
+                from src.api.config import get_config
+                pool_size = get_config().resources.pool_size_override
+            except Exception:
+                pass
+
+        # Auto-detect if still None
         if pool_size is None:
             import psutil
             avail_gb = psutil.virtual_memory().available / (1024**3)
@@ -141,6 +151,8 @@ def get_engine_pool(pool_size: Optional[int] = None) -> EnginePool:
                 f"Auto pool size: {pool_size} "
                 f"(avail={avail_gb:.0f}GB, model={model_gb}GB, headroom={headroom_gb}GB)"
             )
+        else:
+            logger.info(f"Pool size from config: {pool_size}")
 
         _pool = EnginePool(pool_size=pool_size)
         _pool.load()
