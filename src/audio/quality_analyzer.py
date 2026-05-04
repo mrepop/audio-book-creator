@@ -95,12 +95,12 @@ def analyze_segment(
     # 1. Duration check
     if expected_duration_s > 0:
         report.duration_ratio = duration_s / expected_duration_s
-        if report.duration_ratio > 3.0:
+        if report.duration_ratio > 2.5:
             report.issues.append(
                 f"RUNAWAY: audio is {duration_s:.1f}s but expected ~{expected_duration_s:.1f}s "
                 f"({report.duration_ratio:.1f}x longer)"
             )
-        elif report.duration_ratio > 2.0:
+        elif report.duration_ratio > 1.8:
             report.warnings.append(
                 f"LONG: audio is {duration_s:.1f}s, expected ~{expected_duration_s:.1f}s "
                 f"({report.duration_ratio:.1f}x)"
@@ -292,14 +292,14 @@ def _check_transcription(
         matcher = SequenceMatcher(None, expected_words, actual_words)
         report.text_similarity = matcher.ratio()
 
-        if report.text_similarity < 0.3:
+        if report.text_similarity < 0.6:
             report.issues.append(
                 f"GIBBERISH: transcription doesn't match input "
                 f"(similarity={report.text_similarity:.0%}). "
                 f"Expected: '{expected_text[:80]}...' "
                 f"Got: '{transcription[:80]}...'"
             )
-        elif report.text_similarity < 0.6:
+        elif report.text_similarity < 0.75:
             report.warnings.append(
                 f"MISMATCH: partial text match "
                 f"(similarity={report.text_similarity:.0%}). "

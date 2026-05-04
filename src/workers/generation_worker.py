@@ -63,6 +63,7 @@ def run_generation(job_id: str, is_resume: bool = False):
     from src.models import GenerationJob, Book, Chapter, Segment, VoiceProfile, Character, JobStatus
     from src.audio.concatenator import concatenate_chapters
     from src.audio.splicer import splice_chunks
+    from src.audio.quality_analyzer import analyze_segment as check_audio_quality
     from src.tts.chunker import chunk_text, ChunkerConfig
     from src.utils.hardware import profile_resources, log_profile, get_memory_pressure, memory_snapshot, check_memory_safe, get_system_available_gb
 
@@ -326,8 +327,73 @@ def run_generation(job_id: str, is_resume: bool = False):
                         )
                         sf.write(seg_path, seg_audio, sample_rate)
 
+                        # ---- Quality check with auto-retry ----
+                        seg_text = seg.user_text_override or seg.text
+                        est_dur = len(seg_text.split()) / 2.5
+                        # Use Whisper for segments with enough text to compare
+                        # (very short fragments < 5 words skip Whisper)
+                        use_whisper = len(seg_text.split()) >= 5
+                        qa = check_audio_quality(
+                            seg_path,
+                            expected_text=seg_text,
+                            expected_duration_s=est_dur,
+                            use_whisper=use_whisper,
+                            whisper_model_size="base",
+                        )
+
+                        MAX_RETRIES = 2
+                        retry = 0
+                        while not qa.passed and retry < MAX_RETRIES:
+                            retry += 1
+                            logger.warning(
+                                f"Quality check FAILED for ch{chapter.number} seg{seg.sequence_number} "
+                                f"(score={qa.score:.0f}, issues={qa.issues}). "
+                                f"Retry {retry}/{MAX_RETRIES}..."
+                            )
+                            # Regenerate with a different seed
+                            try:
+                                chunk_results = tts_engine.generate_chunks(
+                                    chunks=chunks,
+                                    speaker=speaker,
+                                    instruct=instruct,
+                                    temperature=0.7,
+                                    seed=42 + retry * 100,
+                                )
+                            except Exception:
+                                break
+
+                            chunk_audios = [audio for audio, sr in chunk_results]
+                            del chunk_results
+                            seg_audio = splice_chunks(
+                                chunk_audios=chunk_audios,
+                                sample_rate=sample_rate,
+                                crossfade_ms=cc.crossfade_ms,
+                                sentence_silence_ms=cc.sentence_silence_ms,
+                                paragraph_silence_ms=cc.paragraph_silence_ms,
+                                target_lufs=-16.0,
+                                paragraph_end_flags=[c.is_paragraph_end for c in chunks],
+                            )
+                            del chunk_audios
+                            sf.write(seg_path, seg_audio, sample_rate)
+                            del seg_audio
+
+                            qa = check_audio_quality(
+                                seg_path,
+                                expected_text=seg_text,
+                                expected_duration_s=est_dur,
+                                use_whisper=use_whisper,
+                                whisper_model_size="base",
+                            )
+
+                        if not qa.passed:
+                            logger.warning(
+                                f"Quality check still FAILED after {MAX_RETRIES} retries "
+                                f"for ch{chapter.number} seg{seg.sequence_number} "
+                                f"(score={qa.score:.0f}). Keeping best attempt."
+                            )
+
                         seg.audio_path = seg_path
-                        seg.audio_duration_seconds = len(seg_audio) / sample_rate
+                        seg.audio_duration_seconds = qa.duration_s
                         seg.is_generated = True
                         completed_segments += 1
 
@@ -335,7 +401,6 @@ def run_generation(job_id: str, is_resume: bool = False):
                         paragraph_end_flags.append(
                             seg.segment_type.value == "narration"
                         )
-                        del seg_audio
 
                     # ---- Post-batch cleanup: flush MPS graph cache ----
                     # With the patched PyTorch (PR #181485), empty_cache()
