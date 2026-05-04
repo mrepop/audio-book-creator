@@ -292,9 +292,16 @@ def _check_transcription(
         transcription = result["text"].strip()
         report.transcription = transcription
 
-        # Compare using SequenceMatcher (word-level similarity)
-        expected_words = expected_text.lower().split()
-        actual_words = transcription.lower().split()
+        # Normalize both texts: strip punctuation, collapse whitespace
+        import re
+        def _normalize(text: str) -> list[str]:
+            # Remove punctuation except apostrophes in contractions
+            text = re.sub(r"[^\w\s']", " ", text.lower())
+            # Collapse whitespace
+            return text.split()
+
+        expected_words = _normalize(expected_text)
+        actual_words = _normalize(transcription)
 
         if not expected_words:
             report.text_similarity = 1.0
