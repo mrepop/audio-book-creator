@@ -266,11 +266,36 @@ def run_generation(job_id: str, is_resume: bool = False):
                             speaker_map.get(seg.character_id, narrator_speaker)
                             if seg.character_id else narrator_speaker
                         )
-                        # _build_instruction is a static-like method, safe to call on any instance
-                        instruct = Qwen3TTSEngine._build_instruction(None, {
-                            "emotion": seg.emotion, "emphasis": seg.emphasis, "pacing": seg.pacing
-                        })
-                        chunks = chunk_text(seg_text, config=chunker_cfg)
+                        # Use LLM vocal_direction if available, fall back to tag-based
+                        if seg.vocal_direction:
+                            instruct = seg.vocal_direction
+                        else:
+                            instruct = Qwen3TTSEngine._build_instruction(None, {
+                                "emotion": seg.emotion, "emphasis": seg.emphasis, "pacing": seg.pacing
+                            })
+
+                        # Adjust WPS for pacing/emphasis -- slow speech means
+                        # fewer words fit in a 10s chunk, so we need smaller
+                        # chunks to stay under the 12s quality ceiling.
+                        pacing = seg.pacing or "normal"
+                        emphasis = seg.emphasis or "normal"
+                        vocal_dir = (seg.vocal_direction or "").lower()
+                        wps = cc.words_per_second_estimate  # default 2.5
+                        if pacing == "slow" or pacing == "deliberate" or emphasis == "whispered":
+                            wps = 1.8
+                        elif pacing == "fast" or pacing == "urgent":
+                            wps = 3.2
+                        elif "slow" in vocal_dir or "deliberate" in vocal_dir or "measured" in vocal_dir:
+                            wps = 1.8
+                        elif "fast" in vocal_dir or "urgent" in vocal_dir or "rapid" in vocal_dir:
+                            wps = 3.2
+
+                        seg_chunker_cfg = ChunkerConfig(
+                            target_seconds=cc.target_chunk_seconds,
+                            max_seconds=cc.max_chunk_seconds,
+                            words_per_second=wps,
+                        )
+                        chunks = chunk_text(seg_text, config=seg_chunker_cfg)
                         if chunks:
                             batch_chunk_groups.append((seg, chunks, speaker, instruct))
 

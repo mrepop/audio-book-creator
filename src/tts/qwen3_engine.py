@@ -424,10 +424,13 @@ class Qwen3TTSEngine:
             est_dur = chunk.estimated_duration if hasattr(chunk, "estimated_duration") else 15.0
             est = f"~{est_dur:.1f}s"
 
-            # Cap max_new_tokens based on estimated duration to prevent
-            # runaway generation. At 12Hz, 1s = 12 tokens. Allow 2.5x
-            # headroom, floor at 180 tokens (15s).
-            max_tokens = max(180, min(2048, int(est_dur * 12 * 2.5)))
+            # Hard-cap max_new_tokens to enforce the 12s quality ceiling.
+            # Qwen3-TTS breaks down after ~12s -- gibberish, repetition,
+            # voice drift. At 12Hz, 12s = 144 tokens. Allow 1.3x headroom
+            # for natural speech rate variation, absolute ceiling at 180
+            # tokens (~15s). Floor at 72 tokens (~6s) for very short text.
+            HARD_CEILING_TOKENS = 180  # ~15s absolute max
+            max_tokens = max(72, min(HARD_CEILING_TOKENS, int(est_dur * 12 * 1.3)))
 
             logger.info(f"Chunk {i+1}/{len(chunks)}: {est} | max_tokens={max_tokens} | '{text[:60]}...'")
 
