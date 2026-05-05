@@ -45,11 +45,15 @@ ebook:
 # NLP / Context analysis
 nlp:
   spacy_model: "en_core_web_sm"
-  # Context analysis settings
+  # LLM-powered context analysis (sentence-level vocal direction)
+  llm_enabled: true                           # Use LLM for context analysis (false = keyword fallback)
+  llm_model: "mlx-community/Qwen2.5-7B-Instruct-4bit"  # MLX model for vocal direction
+  llm_context_window: 12                      # Sentences per analysis window
+  llm_context_overlap: 3                      # Overlapping sentences between windows
+  # Legacy settings
   emotion_detection: true
   speaker_attribution: true
-  # Character voice inference
-  auto_voice_traits: true  # Infer voice traits from text descriptions
+  auto_voice_traits: true
 
 # Voice profiles
 voices:
@@ -65,9 +69,11 @@ voices:
     low_temperature: 0.5  # Lower temp for more consistent output
 
 # Chunking -- controls sentence-level audio generation
+# Qwen3-TTS produces clean audio up to ~12s, degrades rapidly after.
+# Target 10s to leave headroom, hard cap at 12s.
 chunking:
-  target_chunk_seconds: 12     # Target duration per TTS chunk (seconds)
-  max_chunk_seconds: 15        # Hard cap -- never generate longer than this
+  target_chunk_seconds: 10     # Target duration per TTS chunk (seconds)
+  max_chunk_seconds: 12        # Hard cap -- Qwen3 breaks down beyond this
   sentence_silence_ms: 200     # Silence inserted between sentences
   paragraph_silence_ms: 500    # Silence inserted between paragraphs
   crossfade_ms: 100            # Hann-window crossfade at chunk boundaries

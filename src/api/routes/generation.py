@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from src.api.database import get_db
 from src.api.schemas import (
@@ -176,9 +176,13 @@ async def download_audiobook(job_id: str, db: Session = Depends(get_db)):
 
 @router.get("/chapters/{chapter_id}/segments", response_model=list[SegmentResponse])
 async def list_segments(chapter_id: int, db: Session = Depends(get_db)):
-    """List all segments in a chapter for sentence-level editing."""
+    """List all segments in a chapter with character attribution info."""
     segments = (
         db.query(Segment)
+        .options(
+            joinedload(Segment.character),
+            joinedload(Segment.detected_character),
+        )
         .filter(Segment.chapter_id == chapter_id)
         .order_by(Segment.sequence_number)
         .all()
@@ -221,6 +225,27 @@ async def regenerate_segment(
 
     background_tasks.add_task(_regenerate_segment, segment_id)
     return {"status": "regenerating", "segment_id": segment_id}
+
+
+@router.get("/segments/{segment_id}/audio")
+async def get_segment_audio(
+    segment_id: int,
+    db: Session = Depends(get_db),
+):
+    """Serve existing audio for a generated segment."""
+    segment = db.query(Segment).filter(Segment.id == segment_id).first()
+    if not segment:
+        raise HTTPException(404, "Segment not found")
+    if not segment.is_generated or not segment.audio_path:
+        raise HTTPException(404, "Segment audio not yet generated")
+    audio_file = Path(segment.audio_path)
+    if not audio_file.exists():
+        raise HTTPException(404, "Audio file not found on disk")
+    return FileResponse(
+        str(audio_file),
+        media_type="audio/wav",
+        filename=f"segment_{segment_id}.wav",
+    )
 
 
 @router.post("/segments/{segment_id}/preview")

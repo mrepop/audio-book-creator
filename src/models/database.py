@@ -195,7 +195,7 @@ class Character(Base):
     # Relationships
     book = relationship("Book", back_populates="characters")
     voice_profile = relationship("VoiceProfile", back_populates="characters")
-    segments = relationship("Segment", back_populates="character")
+    segments = relationship("Segment", back_populates="character", foreign_keys="[Segment.character_id]")
 
 
 class Segment(Base):
@@ -204,7 +204,8 @@ class Segment(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     chapter_id = Column(Integer, ForeignKey("chapters.id"), nullable=False)
-    character_id = Column(Integer, ForeignKey("characters.id"), nullable=True)
+    character_id = Column(Integer, ForeignKey("characters.id"), nullable=True)  # Effective character (may be user-overridden)
+    detected_character_id = Column(Integer, ForeignKey("characters.id"), nullable=True)  # Original NLP detection (immutable)
 
     # Segment content
     text = Column(Text, nullable=False)
@@ -223,6 +224,9 @@ class Segment(Base):
     is_generated = Column(Boolean, default=False)
     skip_generation = Column(Boolean, default=False)  # User can toggle to skip this segment
 
+    # LLM-generated vocal direction (natural language TTS instruction)
+    vocal_direction = Column(Text, nullable=True)
+
     # User overrides
     user_voice_override_id = Column(Integer, ForeignKey("voice_profiles.id"), nullable=True)
     user_emphasis_override = Column(String(50), nullable=True)
@@ -232,8 +236,19 @@ class Segment(Base):
 
     # Relationships
     chapter = relationship("Chapter", back_populates="segments")
-    character = relationship("Character", back_populates="segments")
+    character = relationship("Character", back_populates="segments", foreign_keys=[character_id])
+    detected_character = relationship("Character", foreign_keys=[detected_character_id])
     user_voice_override = relationship("VoiceProfile", foreign_keys=[user_voice_override_id])
+
+    @property
+    def character_name(self):
+        """Name of the effective (possibly overridden) character."""
+        return self.character.name if self.character else None
+
+    @property
+    def detected_character_name(self):
+        """Name of the originally NLP-detected character."""
+        return self.detected_character.name if self.detected_character else None
 
 
 class GenerationJob(Base):

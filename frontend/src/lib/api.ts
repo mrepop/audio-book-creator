@@ -86,9 +86,13 @@ export interface Segment {
   text: string;
   segment_type: string;
   character_id: number | null;
+  detected_character_id: number | null;
+  character_name: string | null;
+  detected_character_name: string | null;
   emotion: string | null;
   emphasis: string | null;
   pacing: string | null;
+  vocal_direction: string | null;
   is_generated: boolean;
   audio_duration_seconds: number | null;
   user_text_override: string | null;
@@ -145,6 +149,7 @@ export const generation = {
     request<Segment>(`/api/generation/segments/${segmentId}`, { method: 'PATCH', body: JSON.stringify(data) }),
   regenerateSegment: (segmentId: number) =>
     request(`/api/generation/segments/${segmentId}/regenerate`, { method: 'POST' }),
+  segmentAudioUrl: (segmentId: number) => `/api/generation/segments/${segmentId}/audio`,
   previewSegment: async (segmentId: number): Promise<Blob> => {
     const res = await fetch(`/api/generation/segments/${segmentId}/preview`, { method: 'POST' });
     if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);

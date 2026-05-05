@@ -135,9 +135,13 @@ class SegmentResponse(BaseModel):
     text: str
     segment_type: str
     character_id: Optional[int] = None
+    detected_character_id: Optional[int] = None
+    character_name: Optional[str] = None
+    detected_character_name: Optional[str] = None
     emotion: Optional[str] = None
     emphasis: Optional[str] = None
     pacing: Optional[str] = None
+    vocal_direction: Optional[str] = None
     is_generated: bool
     audio_duration_seconds: Optional[float] = None
     user_text_override: Optional[str] = None
@@ -147,6 +151,7 @@ class SegmentResponse(BaseModel):
 
 class SegmentUpdateRequest(BaseModel):
     """User overrides for a segment."""
+    character_id: Optional[int] = None  # Override detected character assignment
     user_text_override: Optional[str] = None
     user_emphasis_override: Optional[str] = None
     user_voice_override_id: Optional[int] = None

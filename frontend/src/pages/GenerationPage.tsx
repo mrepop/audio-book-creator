@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AudioWaveform, Download, XCircle, Clock, CheckCircle2, AlertCircle, Loader2, Pause, Play, ChevronDown, ChevronRight, Volume2, Edit3, RefreshCw } from 'lucide-react';
 import { clsx } from 'clsx';
-import { books, generation, type GenerationJob, type Book, type ChapterSummary, type Segment } from '../lib/api';
+import { books, generation, type GenerationJob, type Book, type Character, type ChapterSummary, type Segment } from '../lib/api';
 
 // ---------------------------------------------------------------------------
 // Status config
@@ -112,24 +112,61 @@ function JobCard({ job, onCancel, onPause, onResume }: {
 // ---------------------------------------------------------------------------
 // Segment Row (sentence-level editor)
 // ---------------------------------------------------------------------------
-function SegmentRow({ seg }: { seg: Segment }) {
+function SegmentRow({ seg, characterList, onSegmentUpdate }: {
+  seg: Segment;
+  characterList: Character[];
+  onSegmentUpdate: (segId: number, data: Partial<Segment>) => void;
+}) {
   const [editing, setEditing] = useState(false);
-  const [previewing, setPreviewing] = useState(false);
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [audioUrl, setAudioUrl] = useState<string | null>(
+    // If audio already exists, use the direct serve URL (no TTS needed)
+    seg.is_generated ? generation.segmentAudioUrl(seg.id) : null
+  );
 
-  const handlePreview = async () => {
-    setPreviewing(true);
+  const handlePlay = () => {
+    // Just play existing audio -- no generation
+    if (seg.is_generated) {
+      setAudioUrl(generation.segmentAudioUrl(seg.id));
+    }
+  };
+
+  const handleGenerate = async () => {
+    // Generate fresh audio via TTS (expensive)
+    setGenerating(true);
     try {
       const blob = await generation.previewSegment(seg.id);
       setAudioUrl(URL.createObjectURL(blob));
-    } catch (e) { console.error('Preview failed:', e); }
-    setPreviewing(false);
+      // Update local state to reflect generation
+      onSegmentUpdate(seg.id, { is_generated: true } as Partial<Segment>);
+    } catch (e) { console.error('Generate failed:', e); }
+    setGenerating(false);
+  };
+
+  const handleRegenerate = async () => {
+    setGenerating(true);
+    try {
+      await generation.regenerateSegment(seg.id);
+      // After regen completes server-side, refresh the audio URL with cache-bust
+      setAudioUrl(generation.segmentAudioUrl(seg.id) + `?t=${Date.now()}`);
+      onSegmentUpdate(seg.id, { is_generated: true } as Partial<Segment>);
+    } catch (e) { console.error('Regenerate failed:', e); }
+    setGenerating(false);
+  };
+
+  const handleCharacterChange = async (charId: number | null) => {
+    try {
+      const updated = await generation.updateSegment(seg.id, { character_id: charId } as Partial<Segment>);
+      onSegmentUpdate(seg.id, updated);
+    } catch (e) { console.error('Character update failed:', e); }
   };
 
   const typeColor = seg.segment_type === 'dialogue' ? 'text-blue-400'
     : seg.segment_type === 'internal_thought' ? 'text-purple-400' : 'text-zinc-400';
   const typeLabel = seg.segment_type === 'dialogue' ? 'DLG'
     : seg.segment_type === 'internal_thought' ? 'THT' : 'NAR';
+
+  const isOverridden = seg.character_id !== seg.detected_character_id;
 
   return (
     <div className="group border-b border-border-subtle py-3 px-4 hover:bg-surface-overlay/50">
@@ -141,15 +178,45 @@ function SegmentRow({ seg }: { seg: Segment }) {
 
         <div className="flex-1 min-w-0">
           <p className="text-sm text-zinc-300 leading-relaxed">{seg.user_text_override || seg.text}</p>
+
+          {/* Character attribution */}
+          {seg.segment_type === 'dialogue' && (
+            <div className="mt-1.5 flex items-center gap-2 text-[11px]">
+              <span className="text-zinc-500">Detected:</span>
+              <span className="font-medium text-blue-400">{seg.detected_character_name ?? 'Unknown'}</span>
+              {isOverridden && (
+                <>
+                  <span className="text-zinc-600">-&gt;</span>
+                  <span className="text-zinc-500">Edited:</span>
+                  <span className="font-medium text-amber-400">{seg.character_name ?? 'None'}</span>
+                </>
+              )}
+            </div>
+          )}
+
           <div className="mt-1.5 flex flex-wrap gap-1.5">
             {seg.emotion && <Tag label={seg.emotion} color="bg-amber-500/10 text-amber-400" />}
             {seg.emphasis && seg.emphasis !== 'normal' && <Tag label={seg.emphasis} color="bg-purple-500/10 text-purple-400" />}
             {seg.pacing && seg.pacing !== 'normal' && <Tag label={seg.pacing} color="bg-blue-500/10 text-blue-400" />}
+            {seg.vocal_direction && <Tag label={seg.vocal_direction.slice(0, 40) + (seg.vocal_direction.length > 40 ? '...' : '')} color="bg-cyan-500/10 text-cyan-400" />}
             {seg.is_generated && <Tag label={`${seg.audio_duration_seconds?.toFixed(1)}s`} color="bg-success/10 text-success" />}
           </div>
 
           {editing && (
             <div className="mt-3 rounded-lg bg-surface-overlay p-3 space-y-2">
+              {/* Character override selector */}
+              <div>
+                <label className="text-[10px] uppercase text-zinc-500">Character</label>
+                <select
+                  value={seg.character_id ?? ''}
+                  onChange={e => handleCharacterChange(e.target.value ? Number(e.target.value) : null)}
+                  className="mt-1 w-full rounded border border-border-default bg-surface-raised px-2 py-1.5 text-xs text-zinc-200 focus:border-accent focus:outline-none">
+                  <option value="">None (Narrator)</option>
+                  {characterList.map(c => (
+                    <option key={c.id} value={c.id}>{c.name}{c.role ? ` (${c.role})` : ''}</option>
+                  ))}
+                </select>
+              </div>
               <div>
                 <label className="text-[10px] uppercase text-zinc-500">Instruct (emotion/style for TTS)</label>
                 <input type="text" placeholder="e.g. Speak with warmth and a cheerful tone"
@@ -172,17 +239,26 @@ function SegmentRow({ seg }: { seg: Segment }) {
         </div>
 
         <div className="flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition">
-          <button onClick={handlePreview} disabled={previewing} title="Preview audio"
-            className="rounded p-1.5 text-zinc-500 hover:bg-accent/10 hover:text-accent disabled:animate-pulse">
-            {previewing ? <Loader2 size={14} className="animate-spin" /> : <Volume2 size={14} />}
-          </button>
+          {seg.is_generated ? (
+            /* Play existing audio -- instant, no TTS */
+            <button onClick={handlePlay} title="Play existing audio"
+              className="rounded p-1.5 text-success hover:bg-success/10">
+              <Volume2 size={14} />
+            </button>
+          ) : (
+            /* Generate audio for the first time */
+            <button onClick={handleGenerate} disabled={generating} title="Generate audio"
+              className="rounded p-1.5 text-zinc-500 hover:bg-accent/10 hover:text-accent disabled:animate-pulse">
+              {generating ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+            </button>
+          )}
           <button onClick={() => setEditing(!editing)} title="Edit parameters"
             className="rounded p-1.5 text-zinc-500 hover:bg-accent/10 hover:text-accent">
             <Edit3 size={14} />
           </button>
-          <button onClick={() => generation.regenerateSegment(seg.id)} title="Regenerate"
-            className="rounded p-1.5 text-zinc-500 hover:bg-accent/10 hover:text-accent">
-            <RefreshCw size={14} />
+          <button onClick={handleRegenerate} disabled={generating} title="Regenerate audio"
+            className="rounded p-1.5 text-zinc-500 hover:bg-amber-500/10 hover:text-amber-400 disabled:animate-pulse">
+            {generating ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
           </button>
         </div>
       </div>
@@ -193,7 +269,7 @@ function SegmentRow({ seg }: { seg: Segment }) {
 // ---------------------------------------------------------------------------
 // Chapter Accordion
 // ---------------------------------------------------------------------------
-function ChapterAccordion({ chapter }: { chapter: ChapterSummary }) {
+function ChapterAccordion({ chapter, characterList }: { chapter: ChapterSummary; characterList: Character[] }) {
   const [open, setOpen] = useState(false);
   const [segments, setSegments] = useState<Segment[]>([]);
   const [loadingSegs, setLoadingSegs] = useState(false);
@@ -205,6 +281,10 @@ function ChapterAccordion({ chapter }: { chapter: ChapterSummary }) {
       setLoadingSegs(false);
     }
     setOpen(!open);
+  };
+
+  const handleSegmentUpdate = (segId: number, data: Partial<Segment>) => {
+    setSegments(prev => prev.map(s => s.id === segId ? { ...s, ...data } : s));
   };
 
   return (
@@ -227,7 +307,7 @@ function ChapterAccordion({ chapter }: { chapter: ChapterSummary }) {
             <p className="px-4 py-4 text-xs text-zinc-500">No segments found. Run analysis first.</p>
           ) : (
             <div className="max-h-[500px] overflow-y-auto">
-              {segments.map(seg => <SegmentRow key={seg.id} seg={seg} />)}
+              {segments.map(seg => <SegmentRow key={seg.id} seg={seg} characterList={characterList} onSegmentUpdate={handleSegmentUpdate} />)}
             </div>
           )}
         </div>
@@ -246,6 +326,7 @@ export default function GenerationPage() {
   const [bookList, setBookList] = useState<Book[]>([]);
   const [selectedBook, setSelectedBook] = useState<Book | null>(null);
   const [chapters, setChapters] = useState<ChapterSummary[]>([]);
+  const [charList, setCharList] = useState<Character[]>([]);
   const jobsRef = useRef(jobs);
   jobsRef.current = jobs;
 
@@ -256,7 +337,9 @@ export default function GenerationPage() {
 
   useEffect(() => { books.list().then(d => setBookList(d.books)).catch(() => {}); }, []);
   useEffect(() => {
-    if (selectedBook?.id) books.get(selectedBook.id).then(b => setChapters(b.chapters ?? [])).catch(() => {});
+    if (selectedBook?.id) {
+      books.get(selectedBook.id).then(b => { setChapters(b.chapters ?? []); setCharList(b.characters ?? []); }).catch(() => {});
+    }
   }, [selectedBook]);
 
   useEffect(() => {
@@ -334,7 +417,7 @@ export default function GenerationPage() {
                     ? 'Click a chapter to expand and view segments.'
                     : 'Expand chapters to edit individual segments. Use the preview button to hear audio before generating.'}
                 </p>
-                {chapters.map(ch => <ChapterAccordion key={ch.id} chapter={ch} />)}
+                {chapters.map(ch => <ChapterAccordion key={ch.id} chapter={ch} characterList={charList} />)}
               </div>
             )}
 

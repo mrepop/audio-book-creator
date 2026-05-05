@@ -128,6 +128,18 @@ class ResourceConfig:
 
 
 @dataclass
+class NLPConfig:
+    spacy_model: str = "en_core_web_sm"
+    llm_enabled: bool = True
+    llm_model: str = "mlx-community/Qwen2.5-7B-Instruct-4bit"
+    llm_context_window: int = 12
+    llm_context_overlap: int = 3
+    emotion_detection: bool = True
+    speaker_attribution: bool = True
+    auto_voice_traits: bool = True
+
+
+@dataclass
 class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
@@ -135,6 +147,7 @@ class AppConfig:
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
     resources: ResourceConfig = field(default_factory=ResourceConfig)
+    nlp: NLPConfig = field(default_factory=NLPConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     config_path: Optional[str] = None
 
@@ -255,6 +268,19 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             flush_interval=int(res_raw.get("flush_interval", config.resources.flush_interval)),
             memory_pressure_threshold=float(res_raw.get("memory_pressure_threshold", config.resources.memory_pressure_threshold)),
             engine_pool_size=str(res_raw.get("engine_pool_size", config.resources.engine_pool_size)),
+        )
+
+        # NLP
+        nlp_raw = raw.get("nlp", {})
+        config.nlp = NLPConfig(
+            spacy_model=str(nlp_raw.get("spacy_model", config.nlp.spacy_model)),
+            llm_enabled=bool(nlp_raw.get("llm_enabled", config.nlp.llm_enabled)),
+            llm_model=str(nlp_raw.get("llm_model", config.nlp.llm_model)),
+            llm_context_window=int(nlp_raw.get("llm_context_window", config.nlp.llm_context_window)),
+            llm_context_overlap=int(nlp_raw.get("llm_context_overlap", config.nlp.llm_context_overlap)),
+            emotion_detection=bool(nlp_raw.get("emotion_detection", config.nlp.emotion_detection)),
+            speaker_attribution=bool(nlp_raw.get("speaker_attribution", config.nlp.speaker_attribution)),
+            auto_voice_traits=bool(nlp_raw.get("auto_voice_traits", config.nlp.auto_voice_traits)),
         )
 
         # Logging
