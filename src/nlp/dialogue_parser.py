@@ -98,20 +98,24 @@ class DialogueParser:
             "sighed|groaned|laughed|chuckled|giggled|sobbed"
         )
 
+        # Capture multi-word proper names (1-3 capitalized words)
+        name_pat = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})'
+
         # Check after dialogue
         after = text[dialog_end:dialog_end + 150]
+        # "..." said Victor / "..." said Victor Frankenstein
         after_match = re.search(
-            rf'[,.]?\s*(?:({speech_verbs})\s+(\w+)|(\w+)\s+({speech_verbs}))',
-            after, re.IGNORECASE
+            rf'[,.]?\s*(?:(?:{speech_verbs})\s+{name_pat}|{name_pat}\s+(?:{speech_verbs}))',
+            after
         )
         if after_match:
-            return after_match.group(2) or after_match.group(3)
+            return after_match.group(1) or after_match.group(2)
 
         # Check before dialogue
         before = text[max(0, dialog_start - 150):dialog_start]
         before_match = re.search(
-            rf'(\w+)\s+(?:{speech_verbs})[,:]?\s*$',
-            before, re.IGNORECASE
+            rf'{name_pat}\s+(?:{speech_verbs})[,:]?\s*$',
+            before
         )
         if before_match:
             return before_match.group(1)
