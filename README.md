@@ -2,6 +2,7 @@
 
 # Just a heads up, this is under very heavy development and it's not even close to finished, if you try and use this, you know, godspeed, at your own risk and all. I doubt it'll do anything seriously destructive, but it most likely won't create what you're looking for, maybe not even words at this point.  
 
+# Oh, also made a custom patch to pytorch to stop some memory leaks, it's not merged into pytorch yet, so even if you try using this, it probably won't work on your setup.  If your pytorch has this bug fixed, you can use it, otherwise it will work but it will eventually crash from OOM. -- https://github.com/pytorch/pytorch/issues/181213
 
 Convert ebooks into full audiobooks using Qwen3-TTS with character voice assignment, sentence-level chunking, and production-quality audio splicing.
 
