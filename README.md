@@ -1,5 +1,8 @@
 # Audio Book Creator
 
+# Just a heads up, this is under very heavy development and it's not even close to finished, if you try and use this, you know, godspeed, at your own risk and all. I doubt it'll do anything seriously destructive, but it most likely won't create what you're looking for, maybe not even words at this point.  
+
+
 Convert ebooks into full audiobooks using Qwen3-TTS with character voice assignment, sentence-level chunking, and production-quality audio splicing.
 
 ## Features
