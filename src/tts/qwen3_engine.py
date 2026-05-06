@@ -388,6 +388,11 @@ class Qwen3TTSEngine:
     # two threads submit simultaneously (e.g. generation + preview).
     _generate_lock = threading.Lock()
 
+    # Duration of previous-chunk audio tail to carry forward as prosodic
+    # context for the next chunk.  This gives the model acoustic continuity
+    # so it matches pitch, pace, and energy at the boundary.
+    CONTINUATION_TAIL_S = 2.0
+
     def generate_chunks(
         self,
         chunks,
@@ -398,12 +403,18 @@ class Qwen3TTSEngine:
         top_k: int = 50,
         top_p: float = 0.95,
         seed: Optional[int] = 42,
+        prev_audio_tail: Optional[np.ndarray] = None,
     ) -> list[tuple[np.ndarray, int]]:
         """Generate audio for a list of text chunks, one at a time.
 
         Each chunk is generated individually to keep output under the
         Qwen3 quality threshold (~12-15s).  The same speaker, seed, and
         temperature are used across all chunks for voice consistency.
+
+        Acoustic continuation: the tail end of each chunk's audio is fed
+        as prosodic context to the next chunk via the model's
+        prompt_speech parameter.  This produces smoother energy/pitch
+        transitions at chunk boundaries.
 
         Args:
             chunks: List of Chunk objects (from chunker.py) or plain strings.
@@ -412,12 +423,16 @@ class Qwen3TTSEngine:
             language: Language for all chunks.
             temperature: Sampling temperature (0.7 recommended for consistency).
             seed: Random seed for deterministic generation across chunks.
+            prev_audio_tail: Optional audio from the end of the previous
+                             segment for cross-segment prosodic continuity.
 
         Returns:
             List of (audio_array, sample_rate) tuples, one per chunk.
         """
         model = self._load_model()
         results = []
+        # Carry forward the tail of each chunk for acoustic continuation
+        continuation_audio = prev_audio_tail
 
         for i, chunk in enumerate(chunks):
             text = chunk.text if hasattr(chunk, "text") else str(chunk)
@@ -425,10 +440,6 @@ class Qwen3TTSEngine:
             est = f"~{est_dur:.1f}s"
 
             # Hard-cap max_new_tokens to enforce the 12s quality ceiling.
-            # Qwen3-TTS breaks down after ~12s -- gibberish, repetition,
-            # voice drift. At 12Hz, 12s = 144 tokens. Allow 1.3x headroom
-            # for natural speech rate variation, absolute ceiling at 180
-            # tokens (~15s). Floor at 72 tokens (~6s) for very short text.
             HARD_CEILING_TOKENS = 180  # ~15s absolute max
             max_tokens = max(72, min(HARD_CEILING_TOKENS, int(est_dur * 12 * 1.3)))
 
@@ -440,27 +451,49 @@ class Qwen3TTSEngine:
                 if torch.cuda.is_available():
                     torch.cuda.manual_seed(seed + i)
 
+            # Build optional prompt_speech for acoustic continuation
+            prompt_speech_tensor = None
+            if continuation_audio is not None and len(continuation_audio) > 0:
+                try:
+                    tail_samples = int(self.CONTINUATION_TAIL_S * 24000)
+                    tail = continuation_audio[-tail_samples:] if len(continuation_audio) > tail_samples else continuation_audio
+                    prompt_speech_tensor = torch.from_numpy(tail).unsqueeze(0).to(self.device)
+                except Exception:
+                    prompt_speech_tensor = None  # Fall back to no continuation
+
             try:
                 memory_snapshot(f"chunk:{i+1}/{len(chunks)}:pre")
 
+                gen_kwargs = dict(
+                    text=text,
+                    language=language,
+                    speaker=speaker,
+                    instruct=instruct if instruct else None,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    repetition_penalty=1.05,
+                    max_new_tokens=max_tokens,
+                )
+                # Pass acoustic continuation if the model accepts it
+                if prompt_speech_tensor is not None:
+                    gen_kwargs["prompt_speech"] = prompt_speech_tensor
+
                 with self._generate_lock, torch.inference_mode():
-                    wavs, sr = model.generate_custom_voice(
-                        text=text,
-                        language=language,
-                        speaker=speaker,
-                        instruct=instruct if instruct else None,
-                        temperature=temperature,
-                        top_k=top_k,
-                        top_p=top_p,
-                        repetition_penalty=1.05,
-                        max_new_tokens=max_tokens,
-                    )
+                    try:
+                        wavs, sr = model.generate_custom_voice(**gen_kwargs)
+                    except TypeError:
+                        # Model doesn't support prompt_speech -- fall back
+                        gen_kwargs.pop("prompt_speech", None)
+                        wavs, sr = model.generate_custom_voice(**gen_kwargs)
 
                 if not wavs or len(wavs[0]) == 0:
                     logger.warning(f"Chunk {i+1}: empty waveform, inserting silence")
                     word_count = len(text.split())
                     silence_dur = max(0.5, word_count * 0.15)
-                    results.append((np.zeros(int(24000 * silence_dur), dtype=np.float32), 24000))
+                    audio = np.zeros(int(24000 * silence_dur), dtype=np.float32)
+                    results.append((audio, 24000))
+                    continuation_audio = None
                 else:
                     audio = wavs[0]
                     if isinstance(audio, torch.Tensor):
@@ -469,18 +502,22 @@ class Qwen3TTSEngine:
                         audio = np.array(audio, dtype=np.float32, copy=True)
                     results.append((audio, sr))
                     logger.info(f"Chunk {i+1}: generated {len(audio)/sr:.2f}s")
+                    # Save tail for next chunk's continuation
+                    continuation_audio = audio
 
                 del wavs
+                if prompt_speech_tensor is not None:
+                    del prompt_speech_tensor
                 self._flush_gpu_cache()
                 memory_snapshot(f"chunk:{i+1}/{len(chunks)}:post")
 
             except Exception as e:
                 logger.error(f"Chunk {i+1} generation failed: {e}", exc_info=True)
                 self._flush_gpu_cache()
-                # Insert silence placeholder so indexing stays aligned
                 word_count = len(text.split())
                 silence_dur = max(0.5, word_count * 0.15)
                 results.append((np.zeros(int(24000 * silence_dur), dtype=np.float32), 24000))
+                continuation_audio = None
 
         return results
 

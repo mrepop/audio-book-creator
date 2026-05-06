@@ -203,9 +203,11 @@ def _group_sentences_into_segments(
 
     Rules:
     - Dialogue sentences: each quoted block is its own segment
-    - Narration: group up to 3 sentences with the same emotion/emphasis
-    - Break on: speaker change, emotion change, emphasis change, paragraph boundary
-    - Max ~80 words per narration segment
+    - Narration: group up to 4 sentences, soft limit ~80 words
+    - On emotion/emphasis change: ABSORB the transition sentence into the
+      current group (so the TTS model handles the transition naturally),
+      then break AFTER it.
+    - Hard break on: speaker change, dialogue/narration boundary, paragraph start
     """
     if not sentences:
         return []
@@ -215,6 +217,8 @@ def _group_sentences_into_segments(
     current_ann = None
     current_is_dialogue = None
     current_word_count = 0
+    # Track if we already absorbed a transition sentence (one per group)
+    absorbed_transition = False
 
     for sent, ann in zip(sentences, annotations):
         is_dlg = sent.is_dialogue
@@ -222,23 +226,32 @@ def _group_sentences_into_segments(
 
         # Decide whether to break the current group
         should_break = False
+        is_emotion_shift = False
+
         if current_ann is None:
             should_break = False  # First sentence
         elif is_dlg != current_is_dialogue:
-            should_break = True  # Dialogue/narration boundary
+            should_break = True  # Dialogue/narration boundary -- always hard break
         elif is_dlg:
             # Dialogue: break on speaker change
             if ann.speaker != current_ann.speaker:
                 should_break = True
         else:
-            # Narration: break on style change, paragraph boundary, or size limit
-            if ann.emotion != current_ann.emotion:
-                should_break = True
-            elif ann.emphasis != current_ann.emphasis:
-                should_break = True
+            # Narration: detect style changes
+            emotion_changed = ann.emotion != current_ann.emotion
+            emphasis_changed = ann.emphasis != current_ann.emphasis
+
+            if emotion_changed or emphasis_changed:
+                if not absorbed_transition and current_word_count + word_count <= _MAX_NARRATION_WORDS + 30:
+                    # Absorb this transition sentence into the current group
+                    # so the TTS handles the emotional shift internally.
+                    # Don't break yet -- include it, then break on the NEXT sentence.
+                    is_emotion_shift = True
+                else:
+                    should_break = True
             elif sent.is_paragraph_start and current_sents:
                 should_break = True
-            elif len(current_sents) >= _MAX_NARRATION_SENTENCES:
+            elif len(current_sents) >= _MAX_NARRATION_SENTENCES + 1:  # +1 for absorbed transition
                 should_break = True
             elif current_word_count + word_count > _MAX_NARRATION_WORDS:
                 should_break = True
@@ -251,11 +264,16 @@ def _group_sentences_into_segments(
             })
             current_sents = []
             current_word_count = 0
+            absorbed_transition = False
 
         current_sents.append(sent)
         current_ann = ann
         current_is_dialogue = is_dlg
         current_word_count += word_count
+
+        # If we just absorbed a transition, mark it and force break on the next sentence
+        if is_emotion_shift:
+            absorbed_transition = True
 
     # Flush remaining
     if current_sents:

@@ -39,8 +39,14 @@ Rules:
 - "pacing" is ONE of: normal, slow, fast, deliberate.
 - "vocal_direction" is a SHORT natural-language instruction (10-20 words) describing HOW to speak this sentence aloud. Focus on tone, vocal quality, and emotional texture. Be specific.
 
-IMPORTANT:
-- Consider surrounding context to understand mood shifts and who is speaking.
+EMOTIONAL CONTINUITY (critical for natural audio):
+- Emotions should flow naturally between sentences. Avoid abrupt tonal shifts.
+- If the mood changes, the TRANSITIONAL sentence should bridge the gap. For example, if moving from excitement to solemnity, the bridging sentence should "gradually settle" or "let the energy fade" -- not jump instantly.
+- When a sentence follows intense emotion (shouting, crying, desperate), the next sentence should carry residual energy -- voices don't reset to neutral instantly.
+- Narration between dialogue excerpts should reflect the emotional undertow of the scene, not revert to flat neutral.
+- The vocal_direction should reference what came before when relevant: "Still carrying traces of anger, speak with forced composure" is better than just "Speak calmly."
+
+OTHER RULES:
 - Dialogue attribution tags (said, cried, whispered) tell you the STYLE of the dialogue, not the narration around it.
 - Narration describing someone shouting should still be read in a normal narrative voice -- only the dialogue itself should be shouted.
 - Vary your vocal directions. Avoid repeating the same instruction.

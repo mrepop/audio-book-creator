@@ -103,6 +103,7 @@ def splice_chunks(
     paragraph_silence_ms: int = 500,
     target_lufs: float = -16.0,
     paragraph_end_flags: Optional[List[bool]] = None,
+    per_boundary_crossfade_ms: Optional[List[int]] = None,
 ) -> np.ndarray:
     """Splice chunk audio arrays into a single continuous segment.
 
@@ -113,13 +114,18 @@ def splice_chunks(
     Args:
         chunk_audios: List of audio arrays (one per chunk).
         sample_rate: Audio sample rate (default 24000 for Qwen3).
-        crossfade_ms: Crossfade duration in milliseconds.
+        crossfade_ms: Default crossfade duration in milliseconds.
         sentence_silence_ms: Silence between sentence chunks.
         paragraph_silence_ms: Silence after paragraph-ending chunks.
         target_lufs: Target loudness for per-chunk normalization.
         paragraph_end_flags: Per-chunk boolean flags indicating paragraph
                              endings.  If None, all boundaries use
                              sentence_silence_ms.
+        per_boundary_crossfade_ms: Optional per-boundary crossfade overrides.
+                                   Length should be len(chunk_audios) - 1.
+                                   Use higher values at high-contrast
+                                   emotional boundaries for smoother blends.
+                                   None entries use the default crossfade_ms.
 
     Returns:
         Spliced audio array.
@@ -130,7 +136,7 @@ def splice_chunks(
     if len(chunk_audios) == 1:
         return lufs_normalize(chunk_audios[0], target_lufs)
 
-    crossfade_samples = int(sample_rate * crossfade_ms / 1000)
+    default_crossfade_samples = int(sample_rate * crossfade_ms / 1000)
 
     # Normalize each chunk independently
     normalized = []
@@ -159,9 +165,15 @@ def splice_chunks(
         silence_ms = paragraph_silence_ms if is_para_end else sentence_silence_ms
         silence = generate_silence(silence_ms, sample_rate)
 
+        # Per-boundary crossfade override (for high-contrast emotion transitions)
+        if per_boundary_crossfade_ms and i - 1 < len(per_boundary_crossfade_ms) and per_boundary_crossfade_ms[i - 1] is not None:
+            cf_samples = int(sample_rate * per_boundary_crossfade_ms[i - 1] / 1000)
+        else:
+            cf_samples = default_crossfade_samples
+
         # Add silence then crossfade into next chunk
         result = np.concatenate([result, silence])
-        result = hann_crossfade(result, normalized[i], crossfade_samples)
+        result = hann_crossfade(result, normalized[i], cf_samples)
 
     total_duration = len(result) / sample_rate
     logger.info(

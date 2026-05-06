@@ -239,6 +239,7 @@ def run_generation(job_id: str, is_resume: bool = False):
 
                 segment_audio_paths = []       # Paths to segment WAV files on disk
                 paragraph_end_flags = []       # For chapter-level splicing
+                segment_emotions = []          # Track emotions for crossfade contrast detection
                 BATCH_SEGMENTS = 16            # Process N segments per batch before progress update
 
                 for batch_start in range(0, len(segments), BATCH_SEGMENTS):
@@ -458,6 +459,7 @@ def run_generation(job_id: str, is_resume: bool = False):
                         paragraph_end_flags.append(
                             seg.segment_type.value == "narration"
                         )
+                        segment_emotions.append(seg.emotion or "neutral")
 
                     # ---- Post-batch cleanup: flush MPS graph cache ----
                     # With the patched PyTorch (PR #181485), empty_cache()
@@ -496,6 +498,18 @@ def run_generation(job_id: str, is_resume: bool = False):
                         audio_data, _ = sf.read(sp)
                         seg_audios.append(audio_data)
 
+                    # Build per-boundary crossfade: use 300ms at high-contrast
+                    # emotion boundaries, default elsewhere. This smooths
+                    # transitions where adjacent segments have very different
+                    # emotional character (e.g. excited -> contemplative).
+                    HIGH_CONTRAST_CROSSFADE_MS = 300
+                    boundary_crossfades = []
+                    for bi in range(len(segment_emotions) - 1):
+                        if segment_emotions[bi] != segment_emotions[bi + 1]:
+                            boundary_crossfades.append(HIGH_CONTRAST_CROSSFADE_MS)
+                        else:
+                            boundary_crossfades.append(None)  # use default
+
                     chapter_audio = splice_chunks(
                         chunk_audios=seg_audios,
                         sample_rate=sample_rate,
@@ -504,6 +518,7 @@ def run_generation(job_id: str, is_resume: bool = False):
                         paragraph_silence_ms=cc.paragraph_silence_ms,
                         target_lufs=-16.0,
                         paragraph_end_flags=paragraph_end_flags,
+                        per_boundary_crossfade_ms=boundary_crossfades if boundary_crossfades else None,
                     )
                     del seg_audios
 
@@ -525,6 +540,7 @@ def run_generation(job_id: str, is_resume: bool = False):
                     del chapter_audio
                     segment_audio_paths.clear()
                     paragraph_end_flags.clear()
+                    segment_emotions.clear()
 
                     memory_snapshot(f"worker:chapter-{chapter.number}-done")
 
